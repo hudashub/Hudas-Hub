@@ -1,29 +1,55 @@
-local githubBase = "https://github.com"
+-- Ensure the game is loaded before running script operations
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+task.wait(math.random())
 
--- Get the current game's Place ID
-local placeId = tostring(game.PlaceId)
+-- Set up global execution environment variables to prevent double loading
+local genv = (type(getgenv) == "function" and getgenv()) or nil
+local state = (genv and genv.HudasHubLoaderState) or { loaded = {} }
+if genv then
+    genv.HudasHubLoaderState = state
+end
 
--- Create a dictionary of supported games for easy management
--- Key = Place ID, Value = The exact filename on your GitHub
-local supportedGames = {
-    ["2753915549"] = "2753915549.lua", -- Blox Fruits
-    ["920587430"] = "920587430.lua",   -- Adopt Me
+-- Define your specific target scripts mapping
+-- Format: [PlaceID or GameID] = { "Game Name", "Your Github Raw Script Link" }
+local routes = {
+    [98800969324557] = { "Storage Hunters: Open World", "https://githubusercontent.com" },
+    [9910245722] = { "Iron Soul", "https://githubusercontent.com" },
+    -- Add more IDs and clean github raw links following this pattern
 }
 
--- Check if the current game is in your supported list
-if supportedGames[placeId] then
-    local fileName = supportedGames[placeId]
-    local scriptUrl = githubBase .. fileName
-    
-    -- Fetch and execute the game-specific script
-    local success, result = pcall(function()
-        loadstring(game:HttpGet(scriptUrl))()
-    end)
-    
-    if not success then
-        warn("Failed to load game script: " .. tostring(result))
+-- Check game routing matching both PlaceId or broader GameId (Universe ID)
+local route = routes[game.PlaceId] or routes[game.GameId]
+if not route then
+    warn("Hudas Hub: Game ID (" .. tostring(game.PlaceId) .. ") is not currently supported!")
+    return
+end
+
+-- Prevent the exact script from running multiple times in the same session
+if state.loaded[route[1]] then
+    print("Hudas Hub: " .. route[1] .. " script is already executed!")
+    return
+end
+state.loaded[route[1]] = true
+
+-- Fetch and safely execute the clean text code via HTTP
+local ok, src = pcall(game.HttpGet, game, route[2])
+if ok and src then
+    local func, err = loadstring(src)
+    if func then
+        local success, execErr = pcall(func)
+        if success then
+            print("Hudas Hub: Successfully loaded " .. route[1])
+            return
+        end
+        warn("Hudas Hub: Execution error inside script: " .. tostring(execErr))
+    else
+        warn("Hudas Hub: Syntax compilation error: " .. tostring(err))
     end
 else
-    -- Optional: Load a default script if the game isn't supported yet
-    print("Game not supported by this universal script. Place ID: " .. placeId)
+    warn("Hudas Hub: Failed to fetch the script from GitHub hosting.")
 end
+
+-- Reset the active loading state cache if the script fails out completely
+state.loaded[route[1]] = nil

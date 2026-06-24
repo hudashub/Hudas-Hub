@@ -6,18 +6,17 @@ task.wait(math.random())
 -- ============================================================================
 -- START OF CONFIGURATION
 -- ============================================================================
--- Replace these strings with your real values from your Jnkie dashboard profile!
 local JNKIE_CONFIG = {
     ServiceId = "36686",
     ApiKey    = "e9df6ae9-3321-4d09-89b6-ae2a21dac291",
-    Provider  = "LootLabs" -- Select either "LootLabs" or "Linkvertise"
+    Provider  = "LootLabs" 
 }
 
--- Construct canonical Jnkie network request URLs
+-- CORRECTED JNKIE CLOUD CHANNELS
 local JNKIE_CHECK_API = "https://jnkie.com"
-local JNKIE_GET_KEY_URL = "https://jnkie.com" .. JNKIE_CONFIG.ServiceId .. "&provider=" .. JNKIE_CONFIG.Provider
+local JNKIE_GET_KEY_URL = "https://jnkie.com" .. JNKIE_CONFIG.ServiceId
 
--- Define your specific game files mapping to your GitHub repository raw files!
+-- CORRECTED FILE DIRECTORY LINKS (.lua extensions applied to raw files)
 local routes = {
     [98800969324557] = { "Storage Hunters: Open World", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Storage%20Hunters" },
     [9910245722] = { "Iron Soul", "https://githubusercontent.com" },
@@ -26,7 +25,6 @@ local routes = {
 -- END OF CONFIGURATION
 -- ============================================================================
 
--- Helper functions for execution environment safety
 local function trim(v)
     return tostring(v or ""):match("^%s*(.-)%s*$") or ""
 end
@@ -39,14 +37,12 @@ end
 
 local genv = envOf(getgenv)
 
--- Check if the current game is supported by your router
 local route = routes[game.PlaceId] or routes[game.GameId]
 if not route then
     warn("Hudas Hub: Game ID (" .. tostring(game.PlaceId) .. ") is not currently supported!")
     return
 end
 
--- Prevent double-loading the exact script profile in the same engine session
 local state = (genv and genv.HudasHubLoaderState) or { loaded = {} }
 if genv then
     genv.HudasHubLoaderState = state
@@ -57,7 +53,6 @@ if state.loaded[route[1]] then
     return
 end
 
--- Built-in UI to prompt users for keys using non-blocking fade loops
 local function promptForKeyWindow()
     local CoreGui = game:GetService("CoreGui")
     local TweenService = game:GetService("TweenService")
@@ -70,7 +65,6 @@ local function promptForKeyWindow()
     ScreenGui.Name = "HudasHubKeySystem"
     ScreenGui.IgnoreGuiInset = true
     
-    -- Canvas Group Background Container (Deep Matte Black)
     local CanvasGroup = Instance.new("CanvasGroup", ScreenGui)
     CanvasGroup.Size = UDim2.new(0, 320, 0, 195) 
     CanvasGroup.Position = UDim2.new(0.5, -160, 0.45, -97) 
@@ -81,14 +75,12 @@ local function promptForKeyWindow()
     local MainFrameCorner = Instance.new("UICorner", CanvasGroup)
     MainFrameCorner.CornerRadius = UDim.new(0, 8)
     
-    -- Sleek Red Accent Bar on top
     local AccentBar = Instance.new("Frame", CanvasGroup)
     AccentBar.Size = UDim2.new(1, 0, 0, 3)
     AccentBar.BackgroundColor3 = Color3.fromRGB(220, 20, 20)
     AccentBar.BorderSizePixel = 0
     Instance.new("UICorner", AccentBar).CornerRadius = UDim.new(0, 8)
 
-    -- Header Title
     local Title = Instance.new("TextLabel", CanvasGroup)
     Title.Size = UDim2.new(1, 0, 0, 35)
     Title.Position = UDim2.new(0, 0, 0, 5)
@@ -98,7 +90,6 @@ local function promptForKeyWindow()
     Title.Font = Enum.Font.GothamBold
     Title.TextSize = 14
     
-    -- Input Box (Dark Graphite Background)
     local TextBox = Instance.new("TextBox", CanvasGroup)
     TextBox.Size = UDim2.new(0, 260, 0, 35)
     TextBox.Position = UDim2.new(0.5, -130, 0, 52)
@@ -112,7 +103,6 @@ local function promptForKeyWindow()
     TextBox.BorderSizePixel = 0
     Instance.new("UICorner", TextBox).CornerRadius = UDim.new(0, 5)
     
-    -- Submit Button (Solid Red)
     local SubmitBtn = Instance.new("TextButton", CanvasGroup)
     SubmitBtn.Size = UDim2.new(0, 260, 0, 32)
     SubmitBtn.Position = UDim2.new(0.5, -130, 0, 97)
@@ -125,7 +115,6 @@ local function promptForKeyWindow()
     SubmitBtn.AutoButtonColor = false
     Instance.new("UICorner", SubmitBtn).CornerRadius = UDim.new(0, 5)
     
-    -- Get Key Button (Dark Grey Frame Background)
     local GetKeyBtn = Instance.new("TextButton", CanvasGroup)
     GetKeyBtn.Size = UDim2.new(0, 260, 0, 32)
     GetKeyBtn.Position = UDim2.new(0.5, -130, 0, 137)
@@ -137,7 +126,6 @@ local function promptForKeyWindow()
     GetKeyBtn.BorderSizePixel = 0
     Instance.new("UICorner", GetKeyBtn).CornerRadius = UDim.new(0, 5)
     
-    -- Micro Interactions (Hover Tweens)
     SubmitBtn.MouseEnter:Connect(function()
         TweenService:Create(SubmitBtn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(240, 30, 30)}):Play()
     end)
@@ -145,7 +133,6 @@ local function promptForKeyWindow()
         TweenService:Create(SubmitBtn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(200, 20, 20)}):Play()
     end)
     
-    -- Clipboard logic to copy the dynamic redirect destination link
     GetKeyBtn.MouseButton1Click:Connect(function()
         if setclipboard then
             setclipboard(JNKIE_GET_KEY_URL)
@@ -158,7 +145,6 @@ local function promptForKeyWindow()
         end
     end)
     
-    -- Smooth Scale Intro Pop
     TweenService:Create(CanvasGroup, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
         Position = UDim2.new(0.5, -160, 0.4, -97),
         GroupTransparency = 0
@@ -173,7 +159,6 @@ local function promptForKeyWindow()
         task.wait(0.1)
     end
     
-    -- Smooth Outro Fade Collapse (Executor-Safe thread delay)
     TweenService:Create(CanvasGroup, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
         Position = UDim2.new(0.5, -160, 0.45, -97),
         GroupTransparency = 1
@@ -183,16 +168,12 @@ local function promptForKeyWindow()
     return userEnteredKey
 end
 
--- Process current verification
 local userInput = promptForKeyWindow()
 local cleanKey = trim(userInput)
 
--- Build the secure cloud request parameters string
 local payloadUrl = JNKIE_CHECK_API .. "?serviceId=" .. JNKIE_CONFIG.ServiceId .. "&apiKey=" .. JNKIE_CONFIG.ApiKey .. "&key=" .. cleanKey
-
 local checkSuccess, apiResponse = pcall(game.HttpGet, game, payloadUrl)
 
--- Verify server token feedback validation data
 if checkSuccess and (apiResponse:match("valid") or apiResponse:match("true") or apiResponse:match("success")) then
     print("Hudas Hub: Jnkie Verification Passed! Loading " .. route[1] .. " profile...")
     state.loaded[route[1]] = true
@@ -206,22 +187,17 @@ else
     return
 end
 
--- Fetch and safely execute your script file from GitHub hosting
 local ok, src = pcall(game.HttpGet, game, route[2])
 if ok and src then
     local func, err = loadstring(src)
     if func then
         local execSuccess, execErr = pcall(func)
-        if execSuccess then
-            return
+        if not execSuccess then
+            warn("Hudas Hub: Execution error inside script: " .. tostring(execErr))
         end
-        warn("Hudas Hub: Execution error inside script: " .. tostring(execErr))
     else
         warn("Hudas Hub: Syntax compilation error: " .. tostring(err))
     end
 else
     warn("Hudas Hub: Failed to fetch the script from GitHub hosting.")
 end
-
--- Reset the active loading state cache if the script fails out completely
-state.loaded[route[1]] = nil

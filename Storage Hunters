@@ -923,7 +923,8 @@ local function getClosestContainer()
     local garages = debris and debris:FindFirstChild("Garages")
     if not garages or not rootPart then return nil end
     
-    local closest = nil
+    local best = nil
+    local maxEntryCost = -1
     local minDist = math.huge
     local myPos = rootPart.Position
     
@@ -934,15 +935,23 @@ local function getClosestContainer()
                 local promptPart = prompt.Parent
                 if promptPart and promptPart:IsA("BasePart") then
                     local d = (promptPart.Position - myPos).Magnitude
-                    if d < minDist then
+                    local entryCost = g:GetAttribute("EntryCost") or 0
+                    
+                    if entryCost > maxEntryCost then
+                        maxEntryCost = entryCost
                         minDist = d
-                        closest = { model = g, prompt = prompt, part = promptPart }
+                        best = { model = g, prompt = prompt, part = promptPart }
+                    elseif entryCost == maxEntryCost then
+                        if d < minDist then
+                            minDist = d
+                            best = { model = g, prompt = prompt, part = promptPart }
+                        end
                     end
                 end
             end
         end
     end
-    return closest
+    return best
 end
 
 local function getMyVehicle()

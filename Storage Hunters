@@ -32,7 +32,7 @@ end
 local player    = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local rootPart  = character:WaitForChild("HumanoidRootPart")
-local State
+local State, hasPendingPriorities
 local Items, MutatorMod, Grading
 pcall(function() Items      = require(RS.Modules.Items) end)
 pcall(function() MutatorMod = require(RS.Modules.MutatorModule) end)
@@ -549,6 +549,11 @@ local function startAutoSell()
     if sellThread then task.cancel(sellThread) end
     sellThread = task.spawn(function()
         while State.AutoSellInv do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
             sellAll()
             task.wait(4)
         end
@@ -992,7 +997,7 @@ local function startAutoShelf()
     -- The instant a shelf item SELLS (LifetimeNPCSales ticks up) a slot opened →
     -- re-discover and fill it immediately, no waiting for the next scan.
     shelfSalesConn = player:GetAttributeChangedSignal("LifetimeNPCSales"):Connect(function()
-        if State.AutoShelf then
+        if State.AutoShelf and not hasPendingPriorities() then
             shelfOccupied = {}
             shelfFullLatch = false
             task.spawn(doShelfPass)
@@ -1000,6 +1005,11 @@ local function startAutoShelf()
     end)
     shelfThread = task.spawn(function()
         while State.AutoShelf do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
             doShelfPass()
             task.wait(State.ShelfScanDelay)
         end
@@ -1373,6 +1383,11 @@ local function startAutoClean()
     if autoCleanThread then pcall(task.cancel, autoCleanThread) end
     autoCleanThread = task.spawn(function()
         while State.AutoCleanHighest do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
             local ok, slotState = pcall(function() return R.GetSlotState:InvokeServer() end)
             if ok and slotState and type(slotState.slots) == "table" then
                 local unlocked = slotState.unlockedCount or 1
@@ -1452,6 +1467,11 @@ local function startAutoGrade()
     if autoGradeThread then pcall(task.cancel, autoGradeThread) end
     autoGradeThread = task.spawn(function()
         while State.AutoGradeHighest do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
             local ok, slotState = pcall(function() return R.GetGradeSlotState:InvokeServer() end)
             if ok and slotState and type(slotState.slots) == "table" then
                 local unlocked = slotState.unlockedCount or 1
@@ -1551,6 +1571,11 @@ local function startAutoLocksmith()
     if autoLocksmithThread then pcall(task.cancel, autoLocksmithThread) end
     autoLocksmithThread = task.spawn(function()
         while State.AutoLocksmith do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
             local ok, slotState = pcall(function() return R.GetLocksmithSlotState:InvokeServer() end)
             if ok and slotState and type(slotState.slots) == "table" then
                 local unlocked = slotState.unlockedCount or 1
@@ -1917,11 +1942,80 @@ local function startAutoAccessoryFavorite()
     trackThread(autoAccessoryFavoriteThread)
 end
 
+function hasPendingPriorities()
+    local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+    if not ok or type(inv) ~= "table" then return false end
+    
+    -- Check Auto Favorite Safe
+    if State.AutoFavoriteSafe then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true then
+                local id = tostring(entry.ItemId or "")
+                local itemData = Items and Items[id]
+                if itemData and itemData.SafeId and State.SelectedFavoriteSafes[itemData.Name] then
+                    return true
+                end
+            end
+        end
+    end
+    
+    -- Check Auto Favorite Gavel Trophy
+    if State.AutoGavelFavorite then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true and isGavelTrophy(entry) and matchesGavelTrophyFilters(entry) then
+                return true
+            end
+        end
+    end
+    
+    -- Check Auto Favorite Accessories
+    if State.AutoAccessoryFavorite then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true and isAccessory(entry) and matchesAccessoryFilters(entry) then
+                return true
+            end
+        end
+    end
+    
+    -- Check Auto Favorite Items
+    if State.AutoFavorite then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true then
+                local id = tostring(entry.ItemId or "")
+                local price = getInventoryItemPrice(id, entry)
+                if price >= (State.AutoFavoritePrice or 50000) then
+                    return true
+                end
+            end
+        end
+    end
+    
+    -- Check Auto Lockpick Safe
+    if State.AutoLockpickSafe then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true then
+                local id = tostring(entry.ItemId or "")
+                local itemData = Items and Items[id]
+                if itemData and itemData.SafeId and State.SelectedSafes[itemData.Name] then
+                    return true
+                end
+            end
+        end
+    end
+    
+    return false
+end
+
 local sellInventoryThread
 local function startSellInventory()
     if sellInventoryThread then pcall(task.cancel, sellInventoryThread) end
     sellInventoryThread = task.spawn(function()
         while State.SellInventory do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
             local ok, items = pcall(function() return R.GetSellableItems:InvokeServer() end)
             if ok and type(items) == "table" then
                 local guids = {}
@@ -3133,3 +3227,4 @@ TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirect
 local plotName = State.myPlot and State.myPlot.Name or "Searching..."
 State.status = "[System] Ready! Plot: " .. plotName
 warn("[SH AutoFarm v3] Loaded! Plot:", plotName)
+

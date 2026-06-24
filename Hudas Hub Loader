@@ -181,7 +181,7 @@ end
 -- Define your specific target scripts mapping
 -- Be sure to fill in your real raw script URLs here!
 local routes = {
-    [98800969324557] = { "Storage Hunters: Open World", "https://githubusercontent.com" },
+    [98800969324557] = { "Storage Hunters: Open World", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Storage%20Hunters" },
     [9910245722] = { "Iron Soul", "https://githubusercontent.com" },
 }
 

@@ -1,3 +1,4 @@
+-- Ensure the game is loaded before running script operations
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
@@ -120,16 +121,17 @@ local function promptForKeyWindow()
         task.wait(0.1)
     end
     
-    -- Smooth Outro: Drop down and Fade Out smoothly
+    -- EXECUTOR SAFE OUTRO SYSTEM (Replaced the breaking Completed:Wait system)
     local outroInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-    local outroTween = TweenService:Create(CanvasGroup, outroInfo, {
+    TweenService:Create(CanvasGroup, outroInfo, {
         Position = UDim2.new(0.5, -160, 0.45, -80),
         GroupTransparency = 1
-    })
-    outroTween:Play()
-    outroTween.Completed:Wait() -- Let animation finish before destroying elements
+    }):Play()
     
-    ScreenGui:Destroy()
+    task.delay(0.35, function()
+        ScreenGui:Destroy()
+    end)
+    
     return userEnteredKey
 end
 
@@ -177,9 +179,10 @@ if genv then
 end
 
 -- Define your specific target scripts mapping
+-- Be sure to fill in your real raw script URLs here!
 local routes = {
-    = { "Storage Hunters: Open World", "https://githubusercontent.com" },
-    = { "Iron Soul", "https://githubusercontent.com" },
+    [98800969324557] = { "Storage Hunters: Open World", "https://githubusercontent.com" },
+    [9910245722] = { "Iron Soul", "https://githubusercontent.com" },
 }
 
 -- Check game routing matching both PlaceId or broader GameId (Universe ID)
@@ -191,19 +194,19 @@ end
 
 -- Prevent the exact script from running multiple times in the same session
 if state.loaded[route] then
-    print("Hudas Hub: " .. route .. " script is already executed!")
+    print("Hudas Hub: " .. route[1] .. " script is already executed!")
     return
 end
 state.loaded[route] = true
 
 -- Fetch and safely execute the clean text code via HTTP
-local ok, src = pcall(game.HttpGet, game, route)
+local ok, src = pcall(game.HttpGet, game, route[2])
 if ok and src then
     local func, err = loadstring(src)
     if func then
         local success, execErr = pcall(func)
         if success then
-            print("Hudas Hub: Successfully loaded " .. route)
+            print("Hudas Hub: Successfully loaded " .. route[1])
             return
         end
         warn("Hudas Hub: Execution error inside script: " .. tostring(execErr))

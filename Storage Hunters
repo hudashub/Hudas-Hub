@@ -33,6 +33,7 @@ local player    = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local rootPart  = character:WaitForChild("HumanoidRootPart")
 local State
+local hasPendingFavoritesOrLockpicks
 local Items, MutatorMod, Grading
 pcall(function() Items      = require(RS.Modules.Items) end)
 pcall(function() MutatorMod = require(RS.Modules.MutatorModule) end)
@@ -50,6 +51,32 @@ local PlotFolder= Events:WaitForChild("Plot")
 local DragFolder= Events:WaitForChild("Dragging")
 
 local R = {} -- All remotes in one table to avoid local register overflow
+
+local lastInvFetch = 0
+local cachedInv = nil
+local function invalidateInventoryCache()
+    cachedInv = nil
+    lastInvFetch = 0
+end
+
+local function getInventory()
+    local now = os.clock()
+    if not cachedInv or (now - lastInvFetch) > 0.4 then
+        local getPlayerInv = R.GetPlayerInv
+        if getPlayerInv then
+            local ok, inv = pcall(function() return getPlayerInv:InvokeServer() end)
+            if ok and type(inv) == "table" then
+                cachedInv = inv
+                lastInvFetch = now
+            else
+                return nil
+            end
+        else
+            return nil
+        end
+    end
+    return cachedInv
+end
 
 -- Auction
 R.BidRemote        = AucFolder:WaitForChild("Bid")
@@ -93,7 +120,10 @@ R.GetLockableItems    = LocksmithFolder:WaitForChild("GetLockableItems")
 R.StartLocksmith      = LocksmithFolder:WaitForChild("StartLocksmith")
 R.OpenSafe            = LocksmithFolder:WaitForChild("OpenSafe")
 R.ClaimLocksmithItem  = LocksmithFolder:WaitForChild("ClaimItem")
+R.PicklockInventorySafe = LocksmithFolder:WaitForChild("PicklockInventorySafe")
+R.BuyLockpick         = Events:WaitForChild("LockpickShop"):WaitForChild("BuyLockpick")
 
+warn("[DBG] CP1: Remotes loaded")
 -- ─── GARAGE DISCOVERY ─────────────────────────────────────────────────
 local function discoverAllGarages()
     local debris = WS:FindFirstChild("_Debris")
@@ -292,6 +322,10 @@ State = {
     AutoCleanHighest = false,
     AutoGradeHighest = false,
     AutoLocksmith = false,
+    AutoLockpickSafe = false,
+    SelectedSafes = {},
+    AutoFavoriteSafe = false,
+    SelectedFavoriteSafes = {},
     SellInventory = false,
     ShelfScanDelay  = 1.5,    -- seconds between auto-shelf scans
     ShelfPlaceDelay = 0.15,   -- small delay between placements (snappy, avoids rate-limit)
@@ -357,6 +391,7 @@ local function findMyPlot()
     return nil
 end
 
+warn("[DBG] CP2: State+Helpers defined")
 -- ─── AUTO BID WIN ─────────────────────────────────────────────────────
 -- Live signature (verified via remote spy): UpdateCurrentWinningBid(currentBid, winnerName, bidderChar, nextBidPrice, garageModel)
 local bidConn, auctionOpenConn
@@ -543,6 +578,7 @@ local function startAutoSell()
     if sellThread then task.cancel(sellThread) end
     sellThread = task.spawn(function()
         while State.AutoSellInv do
+            while type(hasPendingFavoritesOrLockpicks) == "function" and hasPendingFavoritesOrLockpicks() do task.wait(0.2) end
             sellAll()
             task.wait(4)
         end
@@ -569,7 +605,10 @@ end
 local function myVehicles()
     local out = {}
     for _, m in ipairs(WS:GetChildren()) do
-        if m:GetAttribute("VehicleGUID") and m:GetAttribute("OwnerUserId") == player.UserId then
+        local ok, isVeh = pcall(function()
+            return m:GetAttribute("VehicleGUID") and m:GetAttribute("OwnerUserId") == player.UserId
+        end)
+        if ok and isVeh then
             table.insert(out, m)
         end
     end
@@ -875,6 +914,7 @@ local function placeOnSlot(slot, it)
         R.PlaceStock:FireServer(it.guid, it.id, cf, shelfPrice(it.id, it.entry),
             slot.shelf:GetAttribute("GUID"), slot.att.Name, false)
     end)
+    invalidateInventoryCache()
     if State.ShelfPlaceDelay > 0 then task.wait(State.ShelfPlaceDelay) end
     return (player:GetAttribute("InventoryCount") or 0) < before
 end
@@ -888,6 +928,7 @@ local BIG_ITEM_WEIGHT = 40   -- items >= this (vehicles, big appliances) need a 
 
 local function doShelfPass()
     if shelfBusy then return 0 end
+    while type(hasPendingFavoritesOrLockpicks) == "function" and hasPendingFavoritesOrLockpicks() do task.wait(0.2) end
     shelfBusy = true
     local placed = 0
     pcall(function()
@@ -908,8 +949,8 @@ local function doShelfPass()
             return
         end
 
-        local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
-        if not ok or type(inv) ~= "table" then return end
+        local inv = getInventory()
+        if not inv or type(inv) ~= "table" then return end
         local items = shelfEligibleItems(inv)
         if #items == 0 then State.status = "🛒 Nothing to add"; return end
 
@@ -1027,6 +1068,7 @@ local function startAntiAFK()
     trackThread(afkThread)
 end
 
+warn("[DBG] CP3: Shelf/Speed/AFK defined")
 -- ─── CONTAINER AUTO-FARM LOOP ──────────────────────────────────────────
 local containerFarmThread
 
@@ -1068,7 +1110,10 @@ end
 
 local function getMyVehicle()
     for _, m in ipairs(WS:GetChildren()) do
-        if m:GetAttribute("VehicleGUID") and m:GetAttribute("OwnerUserId") == player.UserId then
+        local ok, isVeh = pcall(function()
+            return m:GetAttribute("VehicleGUID") and m:GetAttribute("OwnerUserId") == player.UserId
+        end)
+        if ok and isVeh then
             return m
         end
     end
@@ -1315,6 +1360,16 @@ local function startAutoCollectLost()
     trackThread(collectLostThread)
 end
 
+local function isSafeItem(entry)
+    if not entry then return false end
+    local id = tostring(entry.ItemId or "")
+    local data = Items and Items[id]
+    if data and data.SafeId ~= nil then
+        return true
+    end
+    return false
+end
+
 local autoCleanThread = nil
 local function getWashableItemPrice(item)
     local entry = item.data
@@ -1342,7 +1397,7 @@ local function findHighestValueWashableItem()
     local highestItem = nil
     local highestPrice = -1
     for _, item in ipairs(res.items) do
-        if item.data and item.data.Favorited ~= true then
+        if item.data and item.data.Favorited ~= true and not isSafeItem(item.data) then
             local price = getWashableItemPrice(item)
             if price > highestPrice then
                 highestPrice = price
@@ -1357,6 +1412,7 @@ local function startAutoClean()
     if autoCleanThread then pcall(task.cancel, autoCleanThread) end
     autoCleanThread = task.spawn(function()
         while State.AutoCleanHighest do
+            while type(hasPendingFavoritesOrLockpicks) == "function" and hasPendingFavoritesOrLockpicks() do task.wait(0.2) end
             local ok, slotState = pcall(function() return R.GetSlotState:InvokeServer() end)
             if ok and slotState and type(slotState.slots) == "table" then
                 local unlocked = slotState.unlockedCount or 1
@@ -1374,12 +1430,14 @@ local function startAutoClean()
                             pcall(function()
                                 R.StartWash:InvokeServer(slotIndex, item.guid, item.source, item.vehicleGUID)
                             end)
+                            invalidateInventoryCache()
                         end
                     elseif slotData.Washed then
                         State.status = "🧼 Claiming washed item..."
                         pcall(function()
                             R.ClaimWashedItem:InvokeServer(slotIndex)
                         end)
+                        invalidateInventoryCache()
                     elseif workspace:GetServerTimeNow() >= (slotData.StartTime or 0) + (slotData.Duration or 0) then
                         State.status = "🧼 Collecting washed item..."
                         pcall(function()
@@ -1421,7 +1479,7 @@ local function findHighestValueGradableItem()
     local highestItem = nil
     local highestPrice = -1
     for _, item in ipairs(res.items) do
-        if item.data and item.data.Favorited ~= true then
+        if item.data and item.data.Favorited ~= true and not isSafeItem(item.data) then
             local price = getGradableItemPrice(item)
             if price > highestPrice then
                 highestPrice = price
@@ -1436,6 +1494,7 @@ local function startAutoGrade()
     if autoGradeThread then pcall(task.cancel, autoGradeThread) end
     autoGradeThread = task.spawn(function()
         while State.AutoGradeHighest do
+            while type(hasPendingFavoritesOrLockpicks) == "function" and hasPendingFavoritesOrLockpicks() do task.wait(0.2) end
             local ok, slotState = pcall(function() return R.GetGradeSlotState:InvokeServer() end)
             if ok and slotState and type(slotState.slots) == "table" then
                 local unlocked = slotState.unlockedCount or 1
@@ -1453,12 +1512,14 @@ local function startAutoGrade()
                             pcall(function()
                                 R.StartGrading:InvokeServer(slotIndex, item.guid, item.source, item.vehicleGUID)
                             end)
+                            invalidateInventoryCache()
                         end
                     elseif slotData.Grade then
                         State.status = "🎓 Claiming graded item..."
                         pcall(function()
                             R.ClaimGradedItem:InvokeServer(slotIndex)
                         end)
+                        invalidateInventoryCache()
                     elseif workspace:GetServerTimeNow() >= (slotData.StartTime or 0) + (slotData.Duration or 0) then
                         State.status = "🎓 Collecting graded item..."
                         pcall(function()
@@ -1535,6 +1596,7 @@ local function startAutoLocksmith()
     if autoLocksmithThread then pcall(task.cancel, autoLocksmithThread) end
     autoLocksmithThread = task.spawn(function()
         while State.AutoLocksmith do
+            while type(hasPendingFavoritesOrLockpicks) == "function" and hasPendingFavoritesOrLockpicks() do task.wait(0.2) end
             local ok, slotState = pcall(function() return R.GetLocksmithSlotState:InvokeServer() end)
             if ok and slotState and type(slotState.slots) == "table" then
                 local unlocked = slotState.unlockedCount or 1
@@ -1552,12 +1614,14 @@ local function startAutoLocksmith()
                             pcall(function()
                                 R.StartLocksmith:InvokeServer(slotIndex, item.guid, item.source, item.vehicleGUID)
                             end)
+                            invalidateInventoryCache()
                         end
                     elseif slotData.RewardItemId or (slotData.RewardDiamonds and slotData.RewardDiamonds > 0) then
                         State.status = "🔑 Claiming locksmith item..."
                         pcall(function()
                             R.ClaimLocksmithItem:InvokeServer(slotIndex)
                         end)
+                        invalidateInventoryCache()
                     elseif workspace:GetServerTimeNow() >= (slotData.StartTime or 0) + (slotData.Duration or 0) then
                         State.status = "🔑 Opening safe..."
                         pcall(function()
@@ -1570,6 +1634,145 @@ local function startAutoLocksmith()
         end
     end)
     trackThread(autoLocksmithThread)
+end
+
+local function getAllSafes()
+    local list = {}
+    local seen = {}
+    if Items then
+        for id, data in pairs(Items) do
+            if type(data) == "table" and data.SafeId and data.Name then
+                if not seen[data.Name] then
+                    seen[data.Name] = true
+                    table.insert(list, data.Name)
+                end
+            end
+        end
+    end
+    local defaults = { "Junk Safe", "Wooden Safe", "Metal Safe", "Code Safe", "Diamond Safe", "Diamond Vault" }
+    for _, name in ipairs(defaults) do
+        if not seen[name] then
+            seen[name] = true
+            table.insert(list, name)
+        end
+    end
+    table.sort(list)
+    return list
+end
+
+local DiscoveredSafes = getAllSafes()
+
+local function ensureBestLockpickEquipped()
+    local ok, res = pcall(function() return R.BuyLockpick:InvokeServer("Picklock1") end)
+    if ok and res and type(res) == "table" and res.owned then
+        local best = nil
+        for i = 4, 1, -1 do
+            local name = "Picklock" .. i
+            if res.owned[name] then
+                best = name
+                break
+            end
+        end
+        best = best or "Picklock1"
+        if res.equipped ~= best then
+            pcall(function() R.BuyLockpick:InvokeServer(best) end)
+        end
+        return best
+    end
+    return "Picklock1"
+end
+
+local function getLockpickableInventorySafes()
+    local list = {}
+    local inv = getInventory()
+    if type(inv) == "table" then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true then
+                local id = tostring(entry.ItemId or "")
+                local itemData = Items and Items[id]
+                if itemData and itemData.SafeId then
+                    table.insert(list, {
+                        guid = guid,
+                        name = itemData.Name,
+                        safeId = itemData.SafeId,
+                        entry = entry
+                    })
+                end
+            end
+        end
+    end
+    return list
+end
+
+local autoLockpickSafeThread = nil
+local function startAutoLockpickSafe()
+    if autoLockpickSafeThread then pcall(task.cancel, autoLockpickSafeThread) end
+    autoLockpickSafeThread = task.spawn(function()
+        while State.AutoLockpickSafe do
+            pcall(function()
+                ensureBestLockpickEquipped()
+                local safes = getLockpickableInventorySafes()
+                for _, safe in ipairs(safes) do
+                    if not State.AutoLockpickSafe then break end
+                    if State.SelectedSafes[safe.name] then
+                        State.status = "🔓 Lockpicking: " .. safe.name .. "..."
+                        local ok, res = pcall(function()
+                            return R.PicklockInventorySafe:InvokeServer(safe.guid)
+                        end)
+                        invalidateInventoryCache()
+                        if ok and res and type(res) == "table" and res.success then
+                            local rewardStr = ""
+                            if res.rewardItemId then
+                                local rName = Items[tostring(res.rewardItemId)] and Items[tostring(res.rewardItemId)].Name or "Item"
+                                rewardStr = rName
+                            elseif res.rewardDiamonds then
+                                rewardStr = res.rewardDiamonds .. " Diamonds"
+                            end
+                            State.status = "🎉 Unlocked " .. safe.name .. " -> " .. rewardStr
+                        else
+                            State.status = "❌ Failed lockpick: " .. (res and res.error or "unknown error")
+                        end
+                        task.wait(1.5)
+                    end
+                end
+            end)
+            task.wait(0.2)
+        end
+    end)
+    trackThread(autoLockpickSafeThread)
+end
+
+local autoFavoriteSafeThread = nil
+local function startAutoFavoriteSafe()
+    if autoFavoriteSafeThread then pcall(task.cancel, autoFavoriteSafeThread) end
+    autoFavoriteSafeThread = task.spawn(function()
+        while State.AutoFavoriteSafe do
+            pcall(function()
+                local inv = getInventory()
+                if type(inv) == "table" then
+                    for guid, entry in pairs(inv) do
+                        if not State.AutoFavoriteSafe then break end
+                        if entry.Favorited ~= true then
+                            local id = tostring(entry.ItemId or "")
+                            local itemData = Items and Items[id]
+                            if itemData and itemData.SafeId then
+                                if State.SelectedFavoriteSafes[itemData.Name] then
+                                    State.status = "🔒 Favoriting safe: " .. itemData.Name .. "..."
+                                    pcall(function()
+                                        R.ToggleFavoriteItem:InvokeServer(guid)
+                                    end)
+                                    invalidateInventoryCache()
+                                    task.wait(0.25)
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(0.2)
+        end
+    end)
+    trackThread(autoFavoriteSafeThread)
 end
 
 local function getInventoryItemPrice(id, entry)
@@ -1594,8 +1797,8 @@ local function startAutoFavorite()
     autoFavoriteThread = task.spawn(function()
         while State.AutoFavorite do
             pcall(function()
-                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
-                if ok and type(inv) == "table" then
+                local inv = getInventory()
+                if type(inv) == "table" then
                     for guid, entry in pairs(inv) do
                         if not State.AutoFavorite then break end
                         if entry.Favorited ~= true then
@@ -1605,13 +1808,14 @@ local function startAutoFavorite()
                                 pcall(function()
                                     R.ToggleFavoriteItem:InvokeServer(guid)
                                 end)
+                                invalidateInventoryCache()
                                 task.wait(0.25)
                             end
                         end
                     end
                 end
             end)
-            task.wait(3)
+            task.wait(0.2)
         end
     end)
     trackThread(autoFavoriteThread)
@@ -1668,8 +1872,8 @@ local function startAutoGavelFavorite()
     autoGavelFavoriteThread = task.spawn(function()
         while State.AutoGavelFavorite do
             pcall(function()
-                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
-                if ok and type(inv) == "table" then
+                local inv = getInventory()
+                if type(inv) == "table" then
                     for guid, entry in pairs(inv) do
                         if not State.AutoGavelFavorite then break end
                         if entry.Favorited ~= true then
@@ -1677,13 +1881,14 @@ local function startAutoGavelFavorite()
                                 pcall(function()
                                     R.ToggleFavoriteItem:InvokeServer(guid)
                                 end)
+                                invalidateInventoryCache()
                                 task.wait(0.25)
                             end
                         end
                     end
                 end
             end)
-            task.wait(2.5)
+            task.wait(0.2)
         end
     end)
     trackThread(autoGavelFavoriteThread)
@@ -1737,14 +1942,60 @@ local function matchesAccessoryFilters(entry)
     return false
 end
 
+function hasPendingFavoritesOrLockpicks()
+    local inv = getInventory()
+    if not inv or type(inv) ~= "table" then return false end
+    
+    for guid, entry in pairs(inv) do
+        if entry.Favorited ~= true then
+            local id = tostring(entry.ItemId or "")
+            local itemData = Items and Items[id]
+            
+            -- 1. Auto Favorite Safe
+            if State.AutoFavoriteSafe and itemData and itemData.SafeId then
+                if State.SelectedFavoriteSafes[itemData.Name] then
+                    return true
+                end
+            end
+            
+            -- 2. Auto Lockpick Safe
+            if State.AutoLockpickSafe and itemData and itemData.SafeId then
+                if State.SelectedSafes[itemData.Name] then
+                    return true
+                end
+            end
+            
+            -- 3. Auto Favorite Items
+            if State.AutoFavorite then
+                local price = getInventoryItemPrice(id, entry)
+                if price >= (State.AutoFavoritePrice or 50000) then
+                    return true
+                end
+            end
+            
+            -- 4. Auto Favorite Gavel Trophy
+            if State.AutoGavelFavorite and isGavelTrophy(entry) and matchesGavelTrophyFilters(entry) then
+                return true
+            end
+            
+            -- 5. Auto Favorite Accessories
+            if State.AutoAccessoryFavorite and isAccessory(entry) and matchesAccessoryFilters(entry) then
+                return true
+            end
+        end
+    end
+    
+    return false
+end
+
 local autoAccessoryFavoriteThread = nil
 local function startAutoAccessoryFavorite()
     if autoAccessoryFavoriteThread then pcall(task.cancel, autoAccessoryFavoriteThread) end
     autoAccessoryFavoriteThread = task.spawn(function()
         while State.AutoAccessoryFavorite do
             pcall(function()
-                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
-                if ok and type(inv) == "table" then
+                local inv = getInventory()
+                if type(inv) == "table" then
                     for guid, entry in pairs(inv) do
                         if not State.AutoAccessoryFavorite then break end
                         if entry.Favorited ~= true then
@@ -1752,13 +2003,14 @@ local function startAutoAccessoryFavorite()
                                 pcall(function()
                                     R.ToggleFavoriteItem:InvokeServer(guid)
                                 end)
+                                invalidateInventoryCache()
                                 task.wait(0.25)
                             end
                         end
                     end
                 end
             end)
-            task.wait(2.5)
+            task.wait(0.2)
         end
     end)
     trackThread(autoAccessoryFavoriteThread)
@@ -1769,6 +2021,7 @@ local function startSellInventory()
     if sellInventoryThread then pcall(task.cancel, sellInventoryThread) end
     sellInventoryThread = task.spawn(function()
         while State.SellInventory do
+            while type(hasPendingFavoritesOrLockpicks) == "function" and hasPendingFavoritesOrLockpicks() do task.wait(0.2) end
             local ok, items = pcall(function() return R.GetSellableItems:InvokeServer() end)
             if ok and type(items) == "table" then
                 local guids = {}
@@ -1781,6 +2034,7 @@ local function startSellInventory()
                 if #guids > 0 then
                     State.status = "💰 Selling Quick Sell items..."
                     local ok2, result = pcall(function() return R.SellItems:InvokeServer(guids) end)
+                    invalidateInventoryCache()
                     if ok2 and type(result) == "table" then
                         if result.success then
                             local soldCount = result.sold or 0
@@ -1888,6 +2142,7 @@ local SG = Instance.new("ScreenGui")
 SG.Name = "SH_AF3"
 SG.ResetOnSpawn = false
 SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+warn("[DBG] CP4: All functions defined, building GUI")
 SG.Parent = player.PlayerGui
 
 local MF = Instance.new("Frame")
@@ -2379,6 +2634,7 @@ local function teleportDropdown(titleText, items, onSelect)
 end
 
 -- Build toggles
+warn("[DBG] CP5: GUI frame built, creating toggles")
 section("AUTO-FARM")
 toggle("✦", "Auto Farm Loop", function(on)
     State.AutoContainerFarm = on
@@ -2442,6 +2698,32 @@ numberInput("  Min Accessory %", State.AutoAccessoryMinPercent, function(v) Stat
 dropdown("Accessory Filters", DiscoveredAccessoryModifiers,
 function(a) return State.SelectedAccessoryModifiers[a] end,
 function(a, v) State.SelectedAccessoryModifiers[a] = v end)
+toggle("✦", "Auto Favorite Safe", function(on)
+    State.AutoFavoriteSafe = on
+    if on then
+        startAutoFavoriteSafe()
+        State.status = "[Favorite] Auto-favorite Safe ON"
+    else
+        if autoFavoriteSafeThread then pcall(task.cancel, autoFavoriteSafeThread) end
+        State.status = "Auto Favorite Safe OFF"
+    end
+end, "AutoFavoriteSafe")
+dropdown("Auto Favorite Safe Filters", DiscoveredSafes,
+function(s) return State.SelectedFavoriteSafes[s] end,
+function(s, v) State.SelectedFavoriteSafes[s] = v end)
+toggle("✦", "Auto Lockpick Safe", function(on)
+    State.AutoLockpickSafe = on
+    if on then
+        startAutoLockpickSafe()
+        State.status = "[Lockpick] Auto-lockpick ON"
+    else
+        if autoLockpickSafeThread then pcall(task.cancel, autoLockpickSafeThread) end
+        State.status = "Auto Lockpick OFF"
+    end
+end, "AutoLockpickSafe")
+dropdown("Safe Filters", DiscoveredSafes,
+function(s) return State.SelectedSafes[s] end,
+function(s, v) State.SelectedSafes[s] = v end)
 
 section("TELEPORTS")
 teleportDropdown("Select Location to Teleport", {
@@ -2833,6 +3115,9 @@ local function cleanStatus(str)
     clean = clean:gsub("🛡️", "[Player]")
     clean = clean:gsub("👁️", "[Player]")
     clean = clean:gsub("⏱️", "[Wait]")
+    clean = clean:gsub("🔓", "[Lockpick]")
+    clean = clean:gsub("🎉", "[Unlocked]")
+    clean = clean:gsub("❌", "[Err]")
     return clean
 end
 
@@ -2842,7 +3127,7 @@ track(RunService.Heartbeat:Connect(function(dt)
     ISV.Text = tostring(State.itemsSold)
     BWV.Text = tostring(State.bidsWon)
 
-    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoFavorite or State.AutoGavelFavorite or State.AutoAccessoryFavorite or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
+    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoFavorite or State.AutoGavelFavorite or State.AutoAccessoryFavorite or State.AutoFavoriteSafe or State.AutoLockpickSafe or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
     local p = math.abs(math.sin(tick()*2.5))
     SDot.BackgroundColor3 = anyOn
         and Color3.fromRGB(math.floor(120+135*p),20,20)
@@ -2942,6 +3227,7 @@ track(R.RateChanged.OnClientEvent:Connect(function(data)
 end))
 
 -- Init
+warn("[DBG] CP6: All GUI toggles created, init phase")
 startAntiAFK()
 State.myPlot = findMyPlot()
 

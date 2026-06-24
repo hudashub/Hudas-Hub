@@ -188,6 +188,51 @@ end
 
 local DiscoveredMutations = getAllMutations()
 
+local AccessoryIdToDisplay = {}
+local function getAllAccessoryModifiers()
+    local list = { "All" }
+    local seen = {}
+    
+    local ok, AccAttrs = pcall(function() return require(RS.Modules.AccessoryAttributes) end)
+    if ok and AccAttrs and type(AccAttrs.Definitions) == "table" then
+        for id, def in pairs(AccAttrs.Definitions) do
+            local name = def.Display or id
+            if not seen[name] then
+                seen[name] = id
+                table.insert(list, name)
+            end
+        end
+    end
+    
+    if #list <= 1 then
+        local defaults = { "Luck", "Bid Recovery", "Bid Arrow Speed", "Bid Zone Width", "Tip Chance", "NPC Offers Bonus", "Vehicle Speed", "Vehicle Acceleration", "Walkspeed", "Energy Drink Time" }
+        for _, name in ipairs(defaults) do
+            table.insert(list, name)
+        end
+    end
+    table.sort(list)
+    for i, v in ipairs(list) do
+        if v == "All" then
+            table.remove(list, i)
+            break
+        end
+    end
+    table.insert(list, 1, "All")
+    
+    -- Populate reverse lookup map
+    for display, id in pairs(seen) do
+        AccessoryIdToDisplay[id] = display
+    end
+    -- Also map standard display names back to themselves as fallbacks
+    for _, name in ipairs(list) do
+        AccessoryIdToDisplay[name:gsub("%s+", "")] = name
+    end
+    
+    return list
+end
+
+local DiscoveredAccessoryModifiers = getAllAccessoryModifiers()
+
 -- ─── TELEPORT LOCATIONS ───────────────────────────────────────────────
 local TeleportLocations = {
     ["Back Alley"] = Vector3.new(-465.85, 1721.05, -348.42),
@@ -233,6 +278,9 @@ State = {
     AutoGavelFavorite = false,
     AutoGavelMinPercent = 100,
     SelectedGavelMutations = {},
+    AutoAccessoryFavorite = false,
+    AutoAccessoryMinPercent = 100,
+    SelectedAccessoryModifiers = {},
     SelectedContainers = {},
     AutoStartAuction = false,
     AutoBidWin  = false,
@@ -1641,6 +1689,81 @@ local function startAutoGavelFavorite()
     trackThread(autoGavelFavoriteThread)
 end
 
+local function isAccessory(entry)
+    if not entry then return false end
+    if entry.RolledAttributes and type(entry.RolledAttributes.Buffs) == "table" then
+        return true
+    end
+    return false
+end
+
+local function matchesAccessoryFilters(entry)
+    if not isAccessory(entry) then return false end
+    
+    local minPercent = State.AutoAccessoryMinPercent or 100
+    local filterAny = State.SelectedAccessoryModifiers["All"] == true
+    local anyChecked = false
+    for m, on in pairs(State.SelectedAccessoryModifiers) do
+        if m ~= "All" and on then
+            anyChecked = true
+            break
+        end
+    end
+    if not anyChecked then
+        filterAny = true
+    end
+    
+    for _, buff in ipairs(entry.RolledAttributes.Buffs) do
+        if type(buff) == "table" and buff.AttrId then
+            local buffId = buff.AttrId
+            local magnitude = tonumber(buff.Magnitude) or 0
+            
+            local displayName = AccessoryIdToDisplay[buffId] or buffId
+            local matchesFilter = false
+            
+            if filterAny then
+                matchesFilter = true
+            else
+                if State.SelectedAccessoryModifiers[displayName] == true or State.SelectedAccessoryModifiers[buffId] == true then
+                    matchesFilter = true
+                end
+            end
+            
+            if matchesFilter and magnitude >= minPercent then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local autoAccessoryFavoriteThread = nil
+local function startAutoAccessoryFavorite()
+    if autoAccessoryFavoriteThread then pcall(task.cancel, autoAccessoryFavoriteThread) end
+    autoAccessoryFavoriteThread = task.spawn(function()
+        while State.AutoAccessoryFavorite do
+            pcall(function()
+                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+                if ok and type(inv) == "table" then
+                    for guid, entry in pairs(inv) do
+                        if not State.AutoAccessoryFavorite then break end
+                        if entry.Favorited ~= true then
+                            if matchesAccessoryFilters(entry) then
+                                pcall(function()
+                                    R.ToggleFavoriteItem:InvokeServer(guid)
+                                end)
+                                task.wait(0.25)
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(2.5)
+        end
+    end)
+    trackThread(autoAccessoryFavoriteThread)
+end
+
 local sellInventoryThread
 local function startSellInventory()
     if sellInventoryThread then pcall(task.cancel, sellInventoryThread) end
@@ -2305,6 +2428,20 @@ numberInput("  Min Gavel Trophy %", State.AutoGavelMinPercent, function(v) State
 dropdown("Gavel Trophy Filters", DiscoveredMutations,
 function(m) return State.SelectedGavelMutations[m] end,
 function(m, v) State.SelectedGavelMutations[m] = v end)
+toggle("✦", "Auto Favorite Accessories", function(on)
+    State.AutoAccessoryFavorite = on
+    if on then
+        startAutoAccessoryFavorite()
+        State.status = "[Accessory] Auto-favorite Accessory ON"
+    else
+        if autoAccessoryFavoriteThread then pcall(task.cancel, autoAccessoryFavoriteThread) end
+        State.status = "Auto Favorite Accessory OFF"
+    end
+end, "AutoAccessoryFavorite")
+numberInput("  Min Accessory %", State.AutoAccessoryMinPercent, function(v) State.AutoAccessoryMinPercent = v end)
+dropdown("Accessory Filters", DiscoveredAccessoryModifiers,
+function(a) return State.SelectedAccessoryModifiers[a] end,
+function(a, v) State.SelectedAccessoryModifiers[a] = v end)
 
 section("TELEPORTS")
 teleportDropdown("Select Location to Teleport", {
@@ -2705,7 +2842,7 @@ track(RunService.Heartbeat:Connect(function(dt)
     ISV.Text = tostring(State.itemsSold)
     BWV.Text = tostring(State.bidsWon)
 
-    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoFavorite or State.AutoGavelFavorite or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
+    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoFavorite or State.AutoGavelFavorite or State.AutoAccessoryFavorite or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
     local p = math.abs(math.sin(tick()*2.5))
     SDot.BackgroundColor3 = anyOn
         and Color3.fromRGB(math.floor(120+135*p),20,20)

@@ -1,8 +1,173 @@
--- Ensure the game is loaded before running script operations
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 task.wait(math.random())
+
+-- ============================================================================
+-- START OF KEY SYSTEM LOGIC
+-- ============================================================================
+local KeyStorageURL = "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Keys.txt"
+
+-- Simple built-in UI to ask the user for the key with modern animations
+local function promptForKeyWindow()
+    local CoreGui = game:GetService("CoreGui")
+    local TweenService = game:GetService("TweenService")
+    
+    -- Destroy old key UI if it exists to prevent duplication
+    if CoreGui:FindFirstChild("HudasHubKeySystem") then
+        CoreGui.HudasHubKeySystem:Destroy()
+    end
+    
+    local ScreenGui = Instance.new("ScreenGui", CoreGui)
+    ScreenGui.Name = "HudasHubKeySystem"
+    ScreenGui.IgnoreGuiInset = true
+    
+    -- Canvas Group for seamless overall opacity fading
+    local CanvasGroup = Instance.new("CanvasGroup", ScreenGui)
+    CanvasGroup.Size = UDim2.new(0, 320, 0, 160)
+    -- Start slightly lower and completely invisible for the intro pop effect
+    CanvasGroup.Position = UDim2.new(0.5, -160, 0.45, -80) 
+    CanvasGroup.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    CanvasGroup.BorderSizePixel = 0
+    CanvasGroup.GroupTransparency = 1 
+    
+    local MainFrameCorner = Instance.new("UICorner", CanvasGroup)
+    MainFrameCorner.CornerRadius = UDim.new(0, 8)
+    
+    -- Sleek Red Accent Bar on top
+    local AccentBar = Instance.new("Frame", CanvasGroup)
+    AccentBar.Size = UDim2.new(1, 0, 0, 3)
+    AccentBar.Position = UDim2.new(0, 0, 0, 0)
+    AccentBar.BackgroundColor3 = Color3.fromRGB(220, 20, 20)
+    AccentBar.BorderSizePixel = 0
+    
+    local AccentCorner = Instance.new("UICorner", AccentBar)
+    AccentCorner.CornerRadius = UDim.new(0, 8)
+
+    -- Header Title
+    local Title = Instance.new("TextLabel", CanvasGroup)
+    Title.Size = UDim2.new(1, 0, 0, 35)
+    Title.Position = UDim2.new(0, 0, 0, 5)
+    Title.Text = "HUDAS HUB"
+    Title.TextColor3 = Color3.fromRGB(240, 240, 240)
+    Title.BackgroundTransparency = 1
+    Title.Font = Enum.Font.GothamBold
+    Title.TextSize = 14
+    
+    -- Subtitle / Status
+    local Subtitle = Instance.new("TextLabel", CanvasGroup)
+    Subtitle.Size = UDim2.new(1, 0, 0, 15)
+    Subtitle.Position = UDim2.new(0, 0, 0, 35)
+    Subtitle.Text = "Authentication Required"
+    Subtitle.TextColor3 = Color3.fromRGB(130, 130, 130)
+    Subtitle.BackgroundTransparency = 1
+    Subtitle.Font = Enum.Font.Gotham
+    Subtitle.TextSize = 11
+    
+    -- Input Box (Dark Graphite Background)
+    local TextBox = Instance.new("TextBox", CanvasGroup)
+    TextBox.Size = UDim2.new(0, 260, 0, 35)
+    TextBox.Position = UDim2.new(0.5, -130, 0, 65)
+    TextBox.PlaceholderText = "Enter Access Key..."
+    TextBox.PlaceholderColor3 = Color3.fromRGB(80, 80, 80)
+    TextBox.Text = ""
+    TextBox.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+    TextBox.TextColor3 = Color3.fromRGB(240, 240, 240)
+    TextBox.Font = Enum.Font.Gotham
+    TextBox.TextSize = 12
+    TextBox.BorderSizePixel = 0
+    
+    local TextCorner = Instance.new("UICorner", TextBox)
+    TextCorner.CornerRadius = UDim.new(0, 5)
+    
+    -- Submit Button (Solid Clean Red)
+    local SubmitBtn = Instance.new("TextButton", CanvasGroup)
+    SubmitBtn.Size = UDim2.new(0, 260, 0, 32)
+    SubmitBtn.Position = UDim2.new(0.5, -130, 0, 112)
+    SubmitBtn.Text = "VERIFY"
+    SubmitBtn.BackgroundColor3 = Color3.fromRGB(200, 20, 20)
+    SubmitBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    SubmitBtn.Font = Enum.Font.GothamBold
+    SubmitBtn.TextSize = 11
+    SubmitBtn.BorderSizePixel = 0
+    SubmitBtn.AutoButtonColor = false
+    
+    local BtnCorner = Instance.new("UICorner", SubmitBtn)
+    BtnCorner.CornerRadius = UDim.new(0, 5)
+    
+    -- Button Hover Interactivity
+    SubmitBtn.MouseEnter:Connect(function()
+        TweenService:Create(SubmitBtn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(240, 30, 30)}):Play()
+    end)
+    SubmitBtn.MouseLeave:Connect(function()
+        TweenService:Create(SubmitBtn, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(200, 20, 20)}):Play()
+    end)
+    
+    -- Smooth Intro: Scale up and Fade In simultaneously
+    local introInfo = TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+    TweenService:Create(CanvasGroup, introInfo, {
+        Position = UDim2.new(0.5, -160, 0.4, -80),
+        GroupTransparency = 0
+    }):Play()
+    
+    local userEnteredKey = nil
+    SubmitBtn.MouseButton1Click:Connect(function()
+        userEnteredKey = TextBox.Text
+    end)
+    
+    -- Keep the script waiting until they click submit
+    while not userEnteredKey do
+        task.wait(0.1)
+    end
+    
+    -- Smooth Outro: Drop down and Fade Out smoothly
+    local outroInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    local outroTween = TweenService:Create(CanvasGroup, outroInfo, {
+        Position = UDim2.new(0.5, -160, 0.45, -80),
+        GroupTransparency = 1
+    })
+    outroTween:Play()
+    outroTween.Completed:Wait() -- Let animation finish before destroying elements
+    
+    ScreenGui:Destroy()
+    return userEnteredKey
+end
+
+-- Fetch the valid keys list from GitHub hosting
+local success, rawKeys = pcall(game.HttpGet, game, KeyStorageURL)
+if not success or not rawKeys then
+    warn("Hudas Hub: Could not connect to the authentication server.")
+    return
+end
+
+-- Prompt user and split the raw text into a searchable list
+local userInput = promptForKeyWindow()
+local isKeyValid = false
+
+for keyLine in string.gmatch(rawKeys, "[^\r\n]+") do
+    local cleanKey = string.gsub(keyLine, "%s+", "")
+    if userInput == cleanKey and cleanKey ~= "" then
+        isKeyValid = true
+        break
+    end
+end
+
+-- Validate result
+if not isKeyValid then
+    local StarterGui = game:GetService("StarterGui")
+    StarterGui:SetCore("SendNotification", {
+        Title = "Hudas Hub",
+        Text = "Access Denied: Invalid Key",
+        Duration = 5
+    })
+    return
+end
+
+print("Hudas Hub: Access Granted! Checking game profiles...")
+-- ============================================================================
+-- END OF KEY SYSTEM LOGIC
+-- ============================================================================
+
 
 -- Set up global execution environment variables to prevent double loading
 local genv = (type(getgenv) == "function" and getgenv()) or nil
@@ -12,11 +177,9 @@ if genv then
 end
 
 -- Define your specific target scripts mapping
--- Format: [PlaceID or GameID] = { "Game Name", "Your Github Raw Script Link" }
 local routes = {
-    [98800969324557] = { "Storage Hunters: Open World", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Storage%20Hunters" },
-    [9910245722] = { "Iron Soul", "https://githubusercontent.com" },
-    -- Add more IDs and clean github raw links following this pattern
+    = { "Storage Hunters: Open World", "https://githubusercontent.com" },
+    = { "Iron Soul", "https://githubusercontent.com" },
 }
 
 -- Check game routing matching both PlaceId or broader GameId (Universe ID)
@@ -27,20 +190,20 @@ if not route then
 end
 
 -- Prevent the exact script from running multiple times in the same session
-if state.loaded[route[1]] then
-    print("Hudas Hub: " .. route[1] .. " script is already executed!")
+if state.loaded[route] then
+    print("Hudas Hub: " .. route .. " script is already executed!")
     return
 end
-state.loaded[route[1]] = true
+state.loaded[route] = true
 
 -- Fetch and safely execute the clean text code via HTTP
-local ok, src = pcall(game.HttpGet, game, route[2])
+local ok, src = pcall(game.HttpGet, game, route)
 if ok and src then
     local func, err = loadstring(src)
     if func then
         local success, execErr = pcall(func)
         if success then
-            print("Hudas Hub: Successfully loaded " .. route[1])
+            print("Hudas Hub: Successfully loaded " .. route)
             return
         end
         warn("Hudas Hub: Execution error inside script: " .. tostring(execErr))
@@ -52,4 +215,4 @@ else
 end
 
 -- Reset the active loading state cache if the script fails out completely
-state.loaded[route[1]] = nil
+state.loaded[route] = nil

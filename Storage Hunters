@@ -33,6 +33,10 @@ local player    = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local rootPart  = character:WaitForChild("HumanoidRootPart")
 local State
+local Items, MutatorMod, Grading
+pcall(function() Items      = require(RS.Modules.Items) end)
+pcall(function() MutatorMod = require(RS.Modules.MutatorModule) end)
+pcall(function() Grading    = require(RS.Modules.GameConfig).Grading end)
 
 track(player.CharacterAdded:Connect(function(c)
     character = c
@@ -126,6 +130,64 @@ end
 
 local DiscoveredContainers = discoverAllGarages()
 
+local function getAllMutations()
+    local list = { "All" }
+    local seen = {}
+    
+    if MutatorMod then
+        if type(MutatorMod.Mutations) == "table" then
+            for _, m in ipairs(MutatorMod.Mutations) do
+                if m.Name and not seen[m.Name] then
+                    seen[m.Name] = true
+                    table.insert(list, m.Name)
+                end
+            end
+        end
+        if type(MutatorMod.TimeMutations) == "table" then
+            for _, m in ipairs(MutatorMod.TimeMutations) do
+                if m.Name and not seen[m.Name] then
+                    seen[m.Name] = true
+                    table.insert(list, m.Name)
+                end
+            end
+        end
+        if type(MutatorMod.EventMutations) == "table" then
+            for _, m in ipairs(MutatorMod.EventMutations) do
+                if m.Name and not seen[m.Name] then
+                    seen[m.Name] = true
+                    table.insert(list, m.Name)
+                end
+            end
+        end
+        if type(MutatorMod._kinds) == "table" then
+            for name, _ in pairs(MutatorMod._kinds) do
+                if not seen[name] then
+                    seen[name] = true
+                    table.insert(list, name)
+                end
+            end
+        end
+    end
+    
+    if #list <= 1 then
+        local defaults = { "Silver", "Gold", "Corrupted", "Diamond", "Gem", "Chrome", "Hologram", "Black", "Void", "Secret", "Rainbow", "Cobwebbed", "Antique", "Ancient", "Timeless", "Moonlit", "Firefly", "Wet", "Shocked", "Pure", "Spotless", "Tiny", "Huge" }
+        for _, name in ipairs(defaults) do
+            table.insert(list, name)
+        end
+    end
+    table.sort(list)
+    for i, v in ipairs(list) do
+        if v == "All" then
+            table.remove(list, i)
+            break
+        end
+    end
+    table.insert(list, 1, "All")
+    return list
+end
+
+local DiscoveredMutations = getAllMutations()
+
 -- ─── TELEPORT LOCATIONS ───────────────────────────────────────────────
 local TeleportLocations = {
     ["Back Alley"] = Vector3.new(-465.85, 1721.05, -348.42),
@@ -168,6 +230,9 @@ State = {
     AutoCollectLost = false,
     AutoFavorite = false,
     AutoFavoritePrice = 50000,
+    AutoGavelFavorite = false,
+    AutoGavelMinPercent = 100,
+    SelectedGavelMutations = {},
     SelectedContainers = {},
     AutoStartAuction = false,
     AutoBidWin  = false,
@@ -556,10 +621,6 @@ end
 -- Resolve an item model's real value, rarity and mutations the same way the game does:
 --   Items[ItemId]   -> BasePrice + Rarity
 --   MutatorModule:CalculatePriceForEntry(BasePrice, entry)  -> live value (w/ mutators+condition)
-local Items, MutatorMod, Grading
-pcall(function() Items      = require(RS.Modules.Items) end)
-pcall(function() MutatorMod = require(RS.Modules.MutatorModule) end)
-pcall(function() Grading    = require(RS.Modules.GameConfig).Grading end)
 
 local function resolveItemInfo(model)
     if not model or not Items or not MutatorMod then return nil end
@@ -1508,6 +1569,78 @@ local function startAutoFavorite()
     trackThread(autoFavoriteThread)
 end
 
+local function isGavelTrophy(entry)
+    if not entry then return false end
+    local id = tostring(entry.ItemId or "")
+    if id == "376" then return true end
+    local name = Items and Items[id] and Items[id].Name or ""
+    if name:lower():find("gavel") and name:lower():find("trophy") then
+        return true
+    end
+    return false
+end
+
+local function matchesGavelTrophyFilters(entry)
+    if not isGavelTrophy(entry) then return false end
+    if not entry.Mutators or type(entry.Mutators) ~= "table" then return false end
+    
+    local minPercent = State.AutoGavelMinPercent or 100
+    local targetLuck = minPercent / 100
+    
+    local filterAny = State.SelectedGavelMutations["All"] == true
+    local anyChecked = false
+    for m, on in pairs(State.SelectedGavelMutations) do
+        if m ~= "All" and on then
+            anyChecked = true
+            break
+        end
+    end
+    if not anyChecked then
+        filterAny = true
+    end
+    
+    for _, m in ipairs(entry.Mutators) do
+        if type(m) == "table" and m.name then
+            local mName = m.name
+            local mLuck = tonumber(m.luck) or 0
+            
+            if filterAny or State.SelectedGavelMutations[mName] == true then
+                if mLuck >= targetLuck then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local autoGavelFavoriteThread = nil
+local function startAutoGavelFavorite()
+    if autoGavelFavoriteThread then pcall(task.cancel, autoGavelFavoriteThread) end
+    autoGavelFavoriteThread = task.spawn(function()
+        while State.AutoGavelFavorite do
+            pcall(function()
+                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+                if ok and type(inv) == "table" then
+                    for guid, entry in pairs(inv) do
+                        if not State.AutoGavelFavorite then break end
+                        if entry.Favorited ~= true then
+                            if matchesGavelTrophyFilters(entry) then
+                                pcall(function()
+                                    R.ToggleFavoriteItem:InvokeServer(guid)
+                                end)
+                                task.wait(0.25)
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(2.5)
+        end
+    end)
+    trackThread(autoGavelFavoriteThread)
+end
+
 local sellInventoryThread
 local function startSellInventory()
     if sellInventoryThread then pcall(task.cancel, sellInventoryThread) end
@@ -2158,6 +2291,20 @@ toggle("✦", "Auto Favorite Items", function(on)
     end
 end, "AutoFavorite")
 numberInput("  Min Favorite Price ($)", State.AutoFavoritePrice, function(v) State.AutoFavoritePrice = v end)
+toggle("✦", "Auto Favorite Gavel Trophy", function(on)
+    State.AutoGavelFavorite = on
+    if on then
+        startAutoGavelFavorite()
+        State.status = "[Gavel] Auto-favorite Gavel ON"
+    else
+        if autoGavelFavoriteThread then pcall(task.cancel, autoGavelFavoriteThread) end
+        State.status = "Auto Favorite Gavel OFF"
+    end
+end, "AutoGavelFavorite")
+numberInput("  Min Gavel Trophy %", State.AutoGavelMinPercent, function(v) State.AutoGavelMinPercent = v end)
+dropdown("Gavel Trophy Filters", DiscoveredMutations,
+function(m) return State.SelectedGavelMutations[m] end,
+function(m, v) State.SelectedGavelMutations[m] = v end)
 
 section("TELEPORTS")
 teleportDropdown("Select Location to Teleport", {
@@ -2558,7 +2705,7 @@ track(RunService.Heartbeat:Connect(function(dt)
     ISV.Text = tostring(State.itemsSold)
     BWV.Text = tostring(State.bidsWon)
 
-    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoFavorite or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
+    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoFavorite or State.AutoGavelFavorite or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
     local p = math.abs(math.sin(tick()*2.5))
     SDot.BackgroundColor3 = anyOn
         and Color3.fromRGB(math.floor(120+135*p),20,20)

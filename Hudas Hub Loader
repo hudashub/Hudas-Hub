@@ -14,7 +14,7 @@ end
 -- Define your specific target scripts mapping
 -- Format: [PlaceID or GameID] = { "Game Name", "Your Github Raw Script Link" }
 local routes = {
-    [98800969324557] = { "Storage Hunters: Open World", "https://githubusercontent.com" },
+    [98800969324557] = { "Storage Hunters: Open World", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Storage%20Hunters" },
     [9910245722] = { "Iron Soul", "https://githubusercontent.com" },
     -- Add more IDs and clean github raw links following this pattern
 }

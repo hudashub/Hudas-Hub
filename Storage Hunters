@@ -166,6 +166,8 @@ end
 State = {
     AutoContainerFarm = false,
     AutoCollectLost = false,
+    AutoFavorite = false,
+    AutoFavoritePrice = 50000,
     SelectedContainers = {},
     AutoStartAuction = false,
     AutoBidWin  = false,
@@ -681,6 +683,7 @@ end
 -- we leave it in the inventory and move on.
 local InvEvents    = Events:WaitForChild("Inventory")
 R.GetPlayerInv = InvEvents:WaitForChild("GetPlayerInventory")
+R.ToggleFavoriteItem = InvEvents:WaitForChild("ToggleFavoriteItem")
 R.PlaceStock   = PlotFolder:WaitForChild("PlaceStockItem")
 
 -- Sell EVERYTHING in the inventory — Tools AND Vehicles are shelvable (vehicles go on
@@ -1460,6 +1463,51 @@ local function startAutoLocksmith()
     trackThread(autoLocksmithThread)
 end
 
+local function getInventoryItemPrice(id, entry)
+    if not entry then return 0 end
+    local data = Items and Items[id]
+    local basePrice = data and data.BasePrice or 0
+    local price = basePrice
+    if MutatorMod then
+        pcall(function()
+            price = MutatorMod:CalculatePriceForEntry(basePrice, { ItemId = tonumber(id), Mutators = entry.Mutators or {}, Condition = entry.Condition }) or basePrice
+        end)
+    end
+    if Grading and entry.Grade and Grading.GradeMultipliers and Grading.GradeMultipliers[entry.Grade] then
+        price = price * Grading.GradeMultipliers[entry.Grade]
+    end
+    return math.floor(price)
+end
+
+local autoFavoriteThread = nil
+local function startAutoFavorite()
+    if autoFavoriteThread then pcall(task.cancel, autoFavoriteThread) end
+    autoFavoriteThread = task.spawn(function()
+        while State.AutoFavorite do
+            pcall(function()
+                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+                if ok and type(inv) == "table" then
+                    for guid, entry in pairs(inv) do
+                        if not State.AutoFavorite then break end
+                        if entry.Favorited ~= true then
+                            local id = tostring(entry.ItemId or "")
+                            local price = getInventoryItemPrice(id, entry)
+                            if price >= (State.AutoFavoritePrice or 50000) then
+                                pcall(function()
+                                    R.ToggleFavoriteItem:InvokeServer(guid)
+                                end)
+                                task.wait(0.25)
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(3)
+        end
+    end)
+    trackThread(autoFavoriteThread)
+end
+
 local sellInventoryThread
 local function startSellInventory()
     if sellInventoryThread then pcall(task.cancel, sellInventoryThread) end
@@ -1500,6 +1548,79 @@ local function startSellInventory()
         end
     end)
     trackThread(sellInventoryThread)
+end
+
+local autoPromptThread = nil
+local function startAutoPromptHandler()
+    if autoPromptThread then pcall(task.cancel, autoPromptThread) end
+    autoPromptThread = task.spawn(function()
+        while State.AutoContainerFarm do
+            pcall(function()
+                local playerGui = player:FindFirstChild("PlayerGui")
+                if not playerGui then return end
+                
+                for _, sg in ipairs(playerGui:GetChildren()) do
+                    if sg:IsA("ScreenGui") and sg.Enabled and sg.Name ~= "SH_AF3" and sg.Name ~= "SH_AutoFarm_v2" and sg.Name ~= "SH_AutoFarm" then
+                        -- Recursively search descendants for clickable buttons
+                        for _, desc in ipairs(sg:GetDescendants()) do
+                            if desc:IsA("TextButton") and desc.Visible and desc.AbsoluteSize.X > 0 and desc.AbsoluteSize.Y > 0 then
+                                -- Check if the button is actually visible (all parents up to the ScreenGui must be visible)
+                                local isVisible = true
+                                local p = desc.Parent
+                                while p and p ~= sg do
+                                    if p:IsA("GuiObject") and not p.Visible then
+                                        isVisible = false
+                                        break
+                                    end
+                                    p = p.Parent
+                                end
+                                
+                                if isVisible then
+                                    local name = desc.Name
+                                    local text = desc.Text:lower()
+                                    
+                                    local shouldClick = false
+                                    if sg.Name == "ConfirmPromptHost" and name == "ConfirmButton" then
+                                        shouldClick = true
+                                    elseif name == "RepairRevealBackdrop" or name == "RepairContinueButton" then
+                                        shouldClick = true
+                                    elseif name == "ContinueButton" and sg.Name == "TrophyInfoBannerGui" then
+                                        shouldClick = true
+                                    else
+                                        -- General textual matches for starting auctions, continue steps, etc.
+                                        if text:find("yes, start auction") or text:find("start auction") then
+                                            shouldClick = true
+                                        elseif text == "continue" or text == "yes" or text == "confirm" or text == "ok" or text == "okay" then
+                                            shouldClick = true
+                                        end
+                                    end
+                                    
+                                    if shouldClick then
+                                        pcall(function() desc:Activate() end)
+                                        if getconnections then
+                                            pcall(function()
+                                                for _, conn in ipairs(getconnections(desc.MouseButton1Click)) do
+                                                    conn:Fire()
+                                                end
+                                            end)
+                                            pcall(function()
+                                                for _, conn in ipairs(getconnections(desc.Activated)) do
+                                                    conn:Fire()
+                                                end
+                                            end)
+                                        end
+                                        task.wait(0.2)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(0.5)
+        end
+    end)
+    trackThread(autoPromptThread)
 end
 
 -- ─── GUI ─────────────────────────────────────────────────────────────
@@ -2007,8 +2128,10 @@ toggle("✦", "Auto Farm Loop", function(on)
     State.AutoContainerFarm = on
     if on then
         runContainerFarmLoop()
+        startAutoPromptHandler()
     else
         if containerFarmThread then pcall(task.cancel, containerFarmThread) end
+        if autoPromptThread then pcall(task.cancel, autoPromptThread) end
         State.status = "Auto Farm OFF"
     end
 end, "AutoContainerFarm")
@@ -2024,6 +2147,17 @@ toggle("✦", "Auto Collect Lost Items", function(on)
         State.status = "Auto Collect Lost OFF"
     end
 end, "AutoCollectLost")
+toggle("✦", "Auto Favorite Items", function(on)
+    State.AutoFavorite = on
+    if on then
+        startAutoFavorite()
+        State.status = "[Favorite] Auto-favorite ON"
+    else
+        if autoFavoriteThread then pcall(task.cancel, autoFavoriteThread) end
+        State.status = "Auto Favorite OFF"
+    end
+end, "AutoFavorite")
+numberInput("  Min Favorite Price ($)", State.AutoFavoritePrice, function(v) State.AutoFavoritePrice = v end)
 
 section("TELEPORTS")
 teleportDropdown("Select Location to Teleport", {
@@ -2424,7 +2558,7 @@ track(RunService.Heartbeat:Connect(function(dt)
     ISV.Text = tostring(State.itemsSold)
     BWV.Text = tostring(State.bidsWon)
 
-    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
+    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoFavorite or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
     local p = math.abs(math.sin(tick()*2.5))
     SDot.BackgroundColor3 = anyOn
         and Color3.fromRGB(math.floor(120+135*p),20,20)

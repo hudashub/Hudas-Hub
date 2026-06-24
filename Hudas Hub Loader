@@ -1,0 +1,29 @@
+local githubBase = "https://github.com"
+
+-- Get the current game's Place ID
+local placeId = tostring(game.PlaceId)
+
+-- Create a dictionary of supported games for easy management
+-- Key = Place ID, Value = The exact filename on your GitHub
+local supportedGames = {
+    ["2753915549"] = "2753915549.lua", -- Blox Fruits
+    ["920587430"] = "920587430.lua",   -- Adopt Me
+}
+
+-- Check if the current game is in your supported list
+if supportedGames[placeId] then
+    local fileName = supportedGames[placeId]
+    local scriptUrl = githubBase .. fileName
+    
+    -- Fetch and execute the game-specific script
+    local success, result = pcall(function()
+        loadstring(game:HttpGet(scriptUrl))()
+    end)
+    
+    if not success then
+        warn("Failed to load game script: " .. tostring(result))
+    end
+else
+    -- Optional: Load a default script if the game isn't supported yet
+    print("Game not supported by this universal script. Place ID: " .. placeId)
+end

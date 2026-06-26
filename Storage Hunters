@@ -2329,18 +2329,18 @@ mkLabel(HD,"Hudas Hub",UDim2.new(1,-68,0,16),UDim2.new(0,12,0,34),9,Enum.Font.Go
 
 local function hdBtn(txt, xOff, bg)
     local b = Instance.new("TextButton",HD)
-    b.Size = UDim2.new(0,26,0,26)
-    b.Position = UDim2.new(1,xOff,0.5,-13)
+    b.Size = UDim2.new(0,20,0,20)
+    b.Position = UDim2.new(1,xOff,0.5,-10)
     b.BackgroundColor3 = bg
     b.Text = txt; b.TextColor3 = Color3.fromRGB(180,180,180)
-    b.TextSize = 13; b.Font = Enum.Font.GothamBold
+    b.TextSize = 12; b.Font = Enum.Font.GothamBold
     b.BorderSizePixel = 0; b.ZIndex = 5
     Instance.new("UICorner",b).CornerRadius = UDim.new(1,0)
     return b
 end
-local CloseBtn = hdBtn("X",-38,Color3.fromRGB(20,20,20))
+local CloseBtn = hdBtn("X",-30,Color3.fromRGB(20,20,20))
 CloseBtn.TextColor3 = Color3.fromRGB(220,20,20)
-local MinBtn   = hdBtn("-",-72,Color3.fromRGB(20,20,20))
+local MinBtn   = hdBtn("-",-56,Color3.fromRGB(20,20,20))
 MinBtn.TextColor3 = Color3.fromRGB(180,180,180)
 
 -- Content

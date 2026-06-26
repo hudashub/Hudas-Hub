@@ -2271,11 +2271,13 @@ local SG = Instance.new("ScreenGui")
 SG.Name = "SH_AF3"
 SG.ResetOnSpawn = false
 SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+SG.IgnoreGuiInset = true
 SG.Parent = player.PlayerGui
 
 local MF = Instance.new("Frame")
 MF.BackgroundColor3 = Color3.fromRGB(8,8,8)
 MF.BorderSizePixel = 0
+MF.AnchorPoint = Vector2.new(0, 0.5)
 MF.Parent = SG
 Instance.new("UICorner",MF).CornerRadius = UDim.new(0,14)
 local stroke = Instance.new("UIStroke",MF)
@@ -2371,7 +2373,7 @@ local function applyLayout()
         MF.Size = UDim2.new(0, w, 0, h)
         SC.Size = UDim2.new(1, -14, 1, -62)
     end
-    MF.Position = UDim2.new(0, 18, 0.5, -MF.Size.Y.Offset/2)
+    MF.Position = UDim2.new(0, 18, 0.5, 0)
 end
 
 applyLayout()
@@ -3224,19 +3226,21 @@ CloseBtn.MouseButton1Click:Connect(function()
     task.delay(0.25,function() SG:Destroy() end)
 end)
 
--- Drag
+-- Drag (supports both mouse and touch)
 local isDrag,dStart,dPos=false,nil,nil
 HD.InputBegan:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 then isDrag=true;dStart=i.Position;dPos=MF.Position end
+    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+        isDrag=true;dStart=i.Position;dPos=MF.Position
+    end
 end)
 track(UserInputService.InputChanged:Connect(function(i)
-    if isDrag and i.UserInputType==Enum.UserInputType.MouseMovement then
+    if isDrag and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
         local d=i.Position-dStart
         MF.Position=UDim2.new(dPos.X.Scale,dPos.X.Offset+d.X,dPos.Y.Scale,dPos.Y.Offset+d.Y)
     end
 end))
 track(UserInputService.InputEnded:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 then isDrag=false end
+    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then isDrag=false end
 end))
 
 -- Heartbeat update
@@ -3385,8 +3389,9 @@ startAntiAFK()
 State.myPlot = findMyPlot()
 
 MF.Size = UDim2.new(0,0,0,0)
-local targetW, targetH = getLayoutSize()
-TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,targetW,0,targetH)}):Play()
+MF.Position = UDim2.new(0, 18, 0.5, 0)
+local initW, initH = getLayoutSize()
+TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,initW,0,initH)}):Play()
 
 local plotName = State.myPlot and State.myPlot.Name or "Searching..."
 State.status = "[System] Ready! Plot: " .. plotName

@@ -30,76 +30,99 @@ _G.__SH_AF_CLEANUP = function()
 end
 
 local player    = Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
-local rootPart  = character:WaitForChild("HumanoidRootPart")
+local character = player.Character
+local rootPart  = character and character:FindFirstChild("HumanoidRootPart")
 local State, hasPendingPriorities
 local Items, MutatorMod, Grading
-pcall(function() Items      = require(RS.Modules.Items) end)
-pcall(function() MutatorMod = require(RS.Modules.MutatorModule) end)
-pcall(function() Grading    = require(RS.Modules.GameConfig).Grading end)
+local Events, AucFolder, PlotFolder, DragFolder, PawnFolder, WashFolder, VehEvents, GradeFolder, LocksmithFolder, InvEvents
+
+local R = {} -- All remotes in one table to avoid local register overflow
 
 track(player.CharacterAdded:Connect(function(c)
     character = c
     rootPart = c:WaitForChild("HumanoidRootPart")
 end))
 
--- ─── REMOTES (verified paths) ─────────────────────────────────────────
-local Events    = RS:WaitForChild("Events")
-local AucFolder = Events:WaitForChild("Auction")
-local PlotFolder= Events:WaitForChild("Plot")
-local DragFolder= Events:WaitForChild("Dragging")
-
-local R = {} -- All remotes in one table to avoid local register overflow
-
--- Auction
-R.BidRemote        = AucFolder:WaitForChild("Bid")
-R.UpdateWinBid     = AucFolder:WaitForChild("UpdateCurrentWinningBid")
-R.ToggleBiddingUI  = AucFolder:WaitForChild("ToggleBiddingUI")
-R.LeaveAuction     = AucFolder:WaitForChild("LeaveAuction")
-R.AuctionPickupStart = AucFolder:WaitForChild("AuctionPickupStart")
-R.AuctionPickupEnd   = AucFolder:WaitForChild("AuctionPickupEnd")
-
--- Plot/Sell
-R.SellItemRemote = PlotFolder:WaitForChild("SellItem")
-R.PlaceItem      = PlotFolder:WaitForChild("PlaceItem")
-
--- Pawn
-local PawnFolder       = Events:WaitForChild("Pawn")
-R.GetPawnState     = PawnFolder:WaitForChild("GetPawnState")
-R.RateChanged      = PawnFolder:WaitForChild("RateChanged")
-R.GetSellableItems = PawnFolder:WaitForChild("GetSellableItems")
-R.SellItems        = PawnFolder:WaitForChild("SellItems")
-
--- Wash / Cleaning
-local WashFolder       = Events:WaitForChild("Wash")
-R.GetSlotState     = WashFolder:WaitForChild("GetSlotState")
-R.GetWashableItems = WashFolder:WaitForChild("GetWashableItems")
-R.StartWash        = WashFolder:WaitForChild("StartWash")
-R.CollectWash      = WashFolder:WaitForChild("CollectWash")
-R.ClaimWashedItem  = WashFolder:WaitForChild("ClaimWashedItem")
-
--- Vehicles
-local VehEvents    = Events:WaitForChild("Vehicles")
-R.GetOwnedVehicles = VehEvents:WaitForChild("GetOwnedVehicles")
-R.RequestSpawn     = VehEvents:WaitForChild("RequestSpawn")
-
--- Grading
-local GradeFolder       = Events:WaitForChild("Grading")
-R.GetGradeSlotState = GradeFolder:WaitForChild("GetSlotState")
-R.GetGradableItems  = GradeFolder:WaitForChild("GetGradableItems")
-R.StartGrading      = GradeFolder:WaitForChild("StartGrading")
-R.CollectGrade      = GradeFolder:WaitForChild("CollectGrade")
-R.ClaimGradedItem   = GradeFolder:WaitForChild("ClaimGradedItem")
-
--- Locksmith
-local LocksmithFolder     = Events:WaitForChild("Locksmith")
-R.GetLocksmithSlotState = LocksmithFolder:WaitForChild("GetSlotState")
-R.GetLockableItems    = LocksmithFolder:WaitForChild("GetLockableItems")
-R.StartLocksmith      = LocksmithFolder:WaitForChild("StartLocksmith")
-R.OpenSafe            = LocksmithFolder:WaitForChild("OpenSafe")
-R.ClaimLocksmithItem  = LocksmithFolder:WaitForChild("ClaimItem")
-R.PicklockInventorySafe = LocksmithFolder:WaitForChild("PicklockInventorySafe")
-R.BuyLockpick         = Events:WaitForChild("LockpickShop"):WaitForChild("BuyLockpick")
+-- Asynchronous setup to ensure the script and GUI load instantly without yielding the main thread
+task.spawn(function()
+    if not character or not rootPart then
+        character = player.Character or player.CharacterAdded:Wait()
+        rootPart = character:WaitForChild("HumanoidRootPart", 10)
+    end
+    
+    pcall(function() Items      = require(RS:WaitForChild("Modules", 5):WaitForChild("Items", 5)) end)
+    pcall(function() MutatorMod = require(RS:WaitForChild("Modules", 5):WaitForChild("MutatorModule", 5)) end)
+    pcall(function() Grading    = require(RS:WaitForChild("Modules", 5):WaitForChild("GameConfig", 5)).Grading end)
+    
+    Events = RS:WaitForChild("Events", 10)
+    if Events then
+        AucFolder       = Events:WaitForChild("Auction", 5)
+        PlotFolder      = Events:WaitForChild("Plot", 5)
+        DragFolder      = Events:WaitForChild("Dragging", 5)
+        PawnFolder      = Events:WaitForChild("Pawn", 5)
+        WashFolder      = Events:WaitForChild("Wash", 5)
+        VehEvents       = Events:WaitForChild("Vehicles", 5)
+        GradeFolder     = Events:WaitForChild("Grading", 5)
+        LocksmithFolder = Events:WaitForChild("Locksmith", 5)
+        InvEvents       = Events:WaitForChild("Inventory", 5)
+        
+        if AucFolder then
+            R.BidRemote        = AucFolder:WaitForChild("Bid", 5)
+            R.UpdateWinBid     = AucFolder:WaitForChild("UpdateCurrentWinningBid", 5)
+            R.ToggleBiddingUI  = AucFolder:WaitForChild("ToggleBiddingUI", 5)
+            R.LeaveAuction     = AucFolder:WaitForChild("LeaveAuction", 5)
+            R.AuctionPickupStart = AucFolder:WaitForChild("AuctionPickupStart", 5)
+            R.AuctionPickupEnd   = AucFolder:WaitForChild("AuctionPickupEnd", 5)
+        end
+        if PlotFolder then
+            R.SellItemRemote = PlotFolder:WaitForChild("SellItem", 5)
+            R.PlaceItem      = PlotFolder:WaitForChild("PlaceItem", 5)
+            R.PlaceStock     = PlotFolder:WaitForChild("PlaceStockItem", 5)
+        end
+        if PawnFolder then
+            R.GetPawnState     = PawnFolder:WaitForChild("GetPawnState", 5)
+            R.RateChanged      = PawnFolder:WaitForChild("RateChanged", 5)
+            R.GetSellableItems = PawnFolder:WaitForChild("GetSellableItems", 5)
+            R.SellItems        = PawnFolder:WaitForChild("SellItems", 5)
+        end
+        if WashFolder then
+            R.GetSlotState     = WashFolder:WaitForChild("GetSlotState", 5)
+            R.GetWashableItems = WashFolder:WaitForChild("GetWashableItems", 5)
+            R.StartWash        = WashFolder:WaitForChild("StartWash", 5)
+            R.CollectWash      = WashFolder:WaitForChild("CollectWash", 5)
+            R.ClaimWashedItem  = WashFolder:WaitForChild("ClaimWashedItem", 5)
+        end
+        if VehEvents then
+            R.GetVehItems      = VehEvents:WaitForChild("GetVehicleItems", 5)
+            R.TransferToInv    = VehEvents:WaitForChild("TransferVehicleItemsToInventory", 5)
+            R.GetOwnedVehicles = VehEvents:WaitForChild("GetOwnedVehicles", 5)
+            R.RequestSpawn     = VehEvents:WaitForChild("RequestSpawn", 5)
+        end
+        if GradeFolder then
+            R.GetGradeSlotState = GradeFolder:WaitForChild("GetSlotState", 5)
+            R.GetGradableItems  = GradeFolder:WaitForChild("GetGradableItems", 5)
+            R.StartGrading      = GradeFolder:WaitForChild("StartGrading", 5)
+            R.CollectGrade      = GradeFolder:WaitForChild("CollectGrade", 5)
+            R.ClaimGradedItem   = GradeFolder:WaitForChild("ClaimGradedItem", 5)
+        end
+        if LocksmithFolder then
+            R.GetLocksmithSlotState = LocksmithFolder:WaitForChild("GetSlotState", 5)
+            R.GetLockableItems    = LocksmithFolder:WaitForChild("GetLockableItems", 5)
+            R.StartLocksmith      = LocksmithFolder:WaitForChild("StartLocksmith", 5)
+            R.OpenSafe            = LocksmithFolder:WaitForChild("OpenSafe", 5)
+            R.ClaimLocksmithItem  = LocksmithFolder:WaitForChild("ClaimItem", 5)
+            R.PicklockInventorySafe = LocksmithFolder:WaitForChild("PicklockInventorySafe", 5)
+        end
+        if InvEvents then
+            R.GetPlayerInv        = InvEvents:WaitForChild("GetPlayerInventory", 5)
+            R.ToggleFavoriteItem  = InvEvents:WaitForChild("ToggleFavoriteItem", 5)
+        end
+        local LockpickShop = Events:WaitForChild("LockpickShop", 5)
+        if LockpickShop then
+            R.BuyLockpick = LockpickShop:WaitForChild("BuyLockpick", 5)
+        end
+    end
+end)
 
 -- ─── GARAGE DISCOVERY ─────────────────────────────────────────────────
 local function discoverAllGarages()
@@ -570,11 +593,7 @@ end
 -- Uses server remotes, so it works even when you are NOT in the vehicle and far
 -- from base. Unloads only while the inventory has free slots; if full it leaves
 -- the cargo in the vehicle (won't force-unload).
-local VehEvents     = Events:WaitForChild("Vehicles")
-R.GetVehItems   = VehEvents:WaitForChild("GetVehicleItems")
-R.TransferToInv = VehEvents:WaitForChild("TransferVehicleItemsToInventory")
-R.GetOwnedVehicles = VehEvents:WaitForChild("GetOwnedVehicles")
-R.RequestSpawn = VehEvents:WaitForChild("RequestSpawn")
+-- Vehicles (resolved asynchronously at startup)
 local UnloadItems   -- Items DB, for reading weights (heaviest-first option)
 pcall(function() UnloadItems = require(RS.Modules.Items) end)
 
@@ -808,10 +827,7 @@ end
 -- item on a shelf slot and confirm by watching InventoryCount drop. If it doesn't
 -- drop, the item didn't fit (too big for the plot / shelf full / not sellable), so
 -- we leave it in the inventory and move on.
-local InvEvents    = Events:WaitForChild("Inventory")
-R.GetPlayerInv = InvEvents:WaitForChild("GetPlayerInventory")
-R.ToggleFavoriteItem = InvEvents:WaitForChild("ToggleFavoriteItem")
-R.PlaceStock   = PlotFolder:WaitForChild("PlaceStockItem")
+-- Inventory / Placing (resolved asynchronously at startup)
 
 -- Sell EVERYTHING in the inventory — Tools AND Vehicles are shelvable (vehicles go on
 -- Large Floor Podiums). Nothing is skipped by category; keep what you want by
@@ -2263,15 +2279,18 @@ local function startAutoPromptHandler()
 end
 
 -- ─── GUI ─────────────────────────────────────────────────────────────
-if player.PlayerGui:FindFirstChild("SH_AF3") then player.PlayerGui.SH_AF3:Destroy() end
-if player.PlayerGui:FindFirstChild("SH_AutoFarm_v2") then player.PlayerGui.SH_AutoFarm_v2:Destroy() end
-if player.PlayerGui:FindFirstChild("SH_AutoFarm") then player.PlayerGui.SH_AutoFarm:Destroy() end
+local PlayerGui = player:WaitForChild("PlayerGui", 8)
+if PlayerGui then
+    if PlayerGui:FindFirstChild("SH_AF3") then PlayerGui.SH_AF3:Destroy() end
+    if PlayerGui:FindFirstChild("SH_AutoFarm_v2") then PlayerGui.SH_AutoFarm_v2:Destroy() end
+    if PlayerGui:FindFirstChild("SH_AutoFarm") then PlayerGui.SH_AutoFarm:Destroy() end
+end
 
 local SG = Instance.new("ScreenGui")
 SG.Name = "SH_AF3"
 SG.ResetOnSpawn = false
 SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-SG.Parent = player.PlayerGui
+SG.Parent = PlayerGui
 
 local MF = Instance.new("Frame")
 local currentW, currentH = 360, 520
@@ -3471,19 +3490,28 @@ local function updateQuickSellRate(rate)
 end
 
 task.spawn(function()
-    pcall(function()
-        local state = R.GetPawnState:InvokeServer()
-        if state and state.rate then
-            updateQuickSellRate(state.rate)
-        end
-    end)
-end)
-
-track(R.RateChanged.OnClientEvent:Connect(function(data)
-    if data and data.rate then
-        updateQuickSellRate(data.rate)
+    -- Wait for Pawn Shop remotes to be resolved asynchronously
+    local startWait = os.clock()
+    while (not R.RateChanged or not R.GetPawnState) and (os.clock() - startWait) < 10 do
+        task.wait(0.1)
     end
-end))
+    
+    if R.RateChanged and R.GetPawnState then
+        pcall(function()
+            local state = R.GetPawnState:InvokeServer()
+            if state and state.rate then
+                updateQuickSellRate(state.rate)
+            end
+        end)
+        
+        local conn = R.RateChanged.OnClientEvent:Connect(function(data)
+            if data and data.rate then
+                updateQuickSellRate(data.rate)
+            end
+        end)
+        track(conn)
+    end
+end)
 
 -- Init
 startAntiAFK()

@@ -2276,6 +2276,7 @@ SG.Parent = player.PlayerGui
 local MF = Instance.new("Frame")
 local currentW, currentH = 360, 520
 local minimized = false
+local hasDragged = false
 
 local function adjustUIToScreen()
     local camera = workspace.CurrentCamera
@@ -2301,33 +2302,50 @@ local function adjustUIToScreen()
         MF.Size = UDim2.new(0, currentW, 0, currentH)
     end
     
-    -- Keep position clamped within screen bounds
-    local curPos = MF.Position
-    local curX = curPos.X.Offset
-    local curY = curPos.Y.Offset
-    
-    local maxX = screenW - currentW
-    local maxY = screenH - (minimized and 56 or currentH)
-    
-    curX = math.clamp(curX, 0, maxX)
-    curY = math.clamp(curY, 0, maxY)
-    
-    MF.Position = UDim2.new(0, curX, 0, curY)
+    if not hasDragged then
+        MF.AnchorPoint = Vector2.new(0.5, 0.5)
+        MF.Position = UDim2.new(0.5, 0, 0.5, 0)
+    else
+        local curPos = MF.Position
+        local curX = curPos.X.Offset
+        local curY = curPos.Y.Offset
+        
+        local maxX = screenW - currentW
+        local maxY = screenH - (minimized and 56 or currentH)
+        
+        local posX = math.clamp(curX, 0, maxX)
+        local posY = math.clamp(curY, 0, maxY)
+        MF.AnchorPoint = Vector2.new(0, 0)
+        MF.Position = UDim2.new(0, posX, 0, posY)
+    end
 end
 
--- Initialize position and size based on screen viewport
-local camera = workspace.CurrentCamera
-local viewport = camera and camera.ViewportSize
-local screenW, screenH = viewport and viewport.X or 800, viewport and viewport.Y or 600
-local defaultX = 18
-local defaultY = math.clamp(screenH/2 - 260, 0, math.max(0, screenH - 520))
-
+-- Initialize centered position and size based on screen viewport (using AnchorPoint for scaling-safety)
+MF.AnchorPoint = Vector2.new(0.5, 0.5)
 MF.Size = UDim2.new(0, 360, 0, 520)
-MF.Position = UDim2.new(0, defaultX, 0, defaultY)
+MF.Position = UDim2.new(0.5, 0, 0.5, 0)
 
-if camera then
-    track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(adjustUIToScreen))
+-- Helper to convert AnchorPoint to top-left (0,0) without causing visual jumps when dragging/resizing starts
+local function convertAnchorToTopLeft()
+    if MF.AnchorPoint.X ~= 0 or MF.AnchorPoint.Y ~= 0 then
+        local absPos = MF.AbsolutePosition
+        MF.AnchorPoint = Vector2.new(0, 0)
+        MF.Position = UDim2.new(0, absPos.X, 0, absPos.Y)
+    end
 end
+
+local viewportConn
+local function updateCameraConnection()
+    if viewportConn then viewportConn:Disconnect() end
+    local cam = workspace.CurrentCamera
+    if cam then
+        viewportConn = cam:GetPropertyChangedSignal("ViewportSize"):Connect(adjustUIToScreen)
+        track(viewportConn)
+        adjustUIToScreen()
+    end
+end
+track(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(updateCameraConnection))
+updateCameraConnection()
 MF.BackgroundColor3 = Color3.fromRGB(8,8,8)
 MF.BorderSizePixel = 0
 MF.Parent = SG
@@ -3252,7 +3270,10 @@ end)
 local isDrag,dStart,dPos=false,nil,nil
 HD.InputBegan:Connect(function(i)
     if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        isDrag=true;dStart=i.Position;dPos=MF.Position
+        isDrag=true;dStart=i.Position
+        hasDragged = true
+        convertAnchorToTopLeft()
+        dPos=MF.Position
     end
 end)
 track(UserInputService.InputChanged:Connect(function(i)
@@ -3294,7 +3315,8 @@ ResizeHandle.InputBegan:Connect(function(i)
         isResize = true
         rStart = i.Position
         rStartSize = Vector2.new(currentW, currentH)
-        i.ProcessedEvent = true
+        hasDragged = true
+        convertAnchorToTopLeft()
     end
 end)
 track(UserInputService.InputChanged:Connect(function(i)
@@ -3467,8 +3489,8 @@ end))
 startAntiAFK()
 State.myPlot = findMyPlot()
 
-MF.Size = UDim2.new(0,0,0,0)
 adjustUIToScreen()
+MF.Size = UDim2.new(0,0,0,0)
 TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,currentW,0,currentH)}):Play()
 
 local plotName = State.myPlot and State.myPlot.Name or "Searching..."

@@ -1,3 +1,4 @@
+local success, err = pcall(function()
 -- ═══════════════════════════════════════════════════════════════════
 --  STORAGE HUNTERS: OPEN WORLD — AUTO FARM SCRIPT v3
 --  Fixed: Auto Sell from Inventory | Auto Pickup via ProximityPrompts
@@ -2279,7 +2280,31 @@ local function startAutoPromptHandler()
 end
 
 -- ─── GUI ─────────────────────────────────────────────────────────────
-local PlayerGui = player:WaitForChild("PlayerGui", 8)
+
+-- Safe UI Helpers to prevent crashes on executors that do not support modern UI classes
+local function safeUICorner(parent, radius)
+    local corner
+    pcall(function()
+        corner = Instance.new("UICorner")
+        corner.CornerRadius = radius or UDim.new(0, 8)
+        corner.Parent = parent
+    end)
+    return corner
+end
+
+local function safeUIStroke(parent, color, thickness, transparency)
+    local stroke
+    pcall(function()
+        stroke = Instance.new("UIStroke")
+        stroke.Color = color or Color3.new(0,0,0)
+        stroke.Thickness = thickness or 1
+        stroke.Transparency = transparency or 0
+        stroke.Parent = parent
+    end)
+    return stroke
+end
+
+local PlayerGui = player:WaitForChild("PlayerGui")
 if PlayerGui then
     if PlayerGui:FindFirstChild("SH_AF3") then PlayerGui.SH_AF3:Destroy() end
     if PlayerGui:FindFirstChild("SH_AutoFarm_v2") then PlayerGui.SH_AutoFarm_v2:Destroy() end
@@ -2368,11 +2393,8 @@ updateCameraConnection()
 MF.BackgroundColor3 = Color3.fromRGB(8,8,8)
 MF.BorderSizePixel = 0
 MF.Parent = SG
-Instance.new("UICorner",MF).CornerRadius = UDim.new(0,14)
-local stroke = Instance.new("UIStroke",MF)
-stroke.Color = Color3.fromRGB(220,20,20)
-stroke.Thickness = 1.0
-stroke.Transparency = 0.3
+safeUICorner(MF, UDim.new(0,14))
+safeUIStroke(MF, Color3.fromRGB(220,20,20), 1.0, 0.3)
 
 -- Header
 local HD = Instance.new("Frame",MF)
@@ -2381,7 +2403,7 @@ HD.Size = UDim2.new(1,0,0,56)
 HD.BackgroundColor3 = Color3.fromRGB(12,12,12)
 HD.BorderSizePixel = 0
 HD.ZIndex = 3
-Instance.new("UICorner",HD).CornerRadius = UDim.new(0,14)
+safeUICorner(HD, UDim.new(0,14))
 local HDfix = Instance.new("Frame",HD)
 HDfix.Size = UDim2.new(1,0,0.5,0)
 HDfix.Position = UDim2.new(0,0,0.5,0)
@@ -2418,7 +2440,7 @@ local function hdBtn(txt, xOff, bg)
     b.Text = txt; b.TextColor3 = Color3.fromRGB(180,180,180)
     b.TextSize = 13; b.Font = Enum.Font.GothamBold
     b.BorderSizePixel = 0; b.ZIndex = 5
-    Instance.new("UICorner",b).CornerRadius = UDim.new(1,0)
+    safeUICorner(b, UDim.new(1,0))
     return b
 end
 local CloseBtn = hdBtn("✕",-38,Color3.fromRGB(20,20,20))
@@ -2445,13 +2467,13 @@ local SB = Instance.new("Frame",SC)
 SB.Size = UDim2.new(1,0,0,34)
 SB.BackgroundColor3 = Color3.fromRGB(12,12,12)
 SB.BorderSizePixel = 0; SB.LayoutOrder = 0
-Instance.new("UICorner",SB).CornerRadius = UDim.new(0,10)
+safeUICorner(SB, UDim.new(0,10))
 local SDot = Instance.new("Frame",SB)
 SDot.Size = UDim2.new(0,8,0,8)
 SDot.Position = UDim2.new(0,10,0.5,-4)
 SDot.BackgroundColor3 = Color3.fromRGB(40,40,40)
 SDot.BorderSizePixel = 0
-Instance.new("UICorner",SDot).CornerRadius = UDim.new(1,0)
+safeUICorner(SDot, UDim.new(1,0))
 local SLbl = mkLabel(SB,"Status: Idle",UDim2.new(1,-28,1,0),UDim2.new(0,26,0,0),11,Enum.Font.Gotham,Color3.fromRGB(180,180,180),1)
 SLbl.TextTruncate = Enum.TextTruncate.AtEnd
 
@@ -2460,7 +2482,7 @@ local SF = Instance.new("Frame",SC)
 SF.Size = UDim2.new(1,0,0,60)
 SF.BackgroundColor3 = Color3.fromRGB(12,12,12)
 SF.BorderSizePixel = 0; SF.LayoutOrder = 1
-Instance.new("UICorner",SF).CornerRadius = UDim.new(0,10)
+safeUICorner(SF, UDim.new(0,10))
 local sgL = Instance.new("UIListLayout",SF)
 sgL.FillDirection = Enum.FillDirection.Horizontal
 sgL.HorizontalAlignment = Enum.HorizontalAlignment.Center
@@ -2474,7 +2496,7 @@ do
         c.Size = UDim2.new(0.33,-2,1,-10)
         c.BackgroundColor3 = Color3.fromRGB(16,16,16)
         c.BorderSizePixel = 0; c.LayoutOrder = order
-        Instance.new("UICorner",c).CornerRadius = UDim.new(0,9)
+        safeUICorner(c, UDim.new(0,9))
         mkLabel(c,icon,UDim2.new(1,0,0,20),UDim2.new(0,0,0,3),14,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),1,Enum.TextXAlignment.Center)
         local v = mkLabel(c,"0",UDim2.new(1,0,0,14),UDim2.new(0,0,0,22),12,Enum.Font.GothamBold,Color3.fromRGB(255,255,255),1,Enum.TextXAlignment.Center)
         mkLabel(c,lbl,UDim2.new(1,0,0,12),UDim2.new(0,0,0,38),9,nil,Color3.fromRGB(120,120,120),1,Enum.TextXAlignment.Center)
@@ -2499,7 +2521,7 @@ local function section(txt)
     local bar = Instance.new("Frame",holder)
     bar.Size = UDim2.new(0,3,0,12); bar.Position = UDim2.new(0,4,0.5,-5)
     bar.BackgroundColor3 = Color3.fromRGB(220,20,20); bar.BorderSizePixel = 0
-    Instance.new("UICorner",bar).CornerRadius = UDim.new(1,0)
+    safeUICorner(bar, UDim.new(1,0))
     local l = Instance.new("TextLabel",holder)
     l.Size = UDim2.new(1,-18,1,0); l.Position = UDim2.new(0,14,0,0)
     l.BackgroundTransparency = 1
@@ -2514,8 +2536,8 @@ local function toggle(icon, txt, onFn, key)
     row.Size = UDim2.new(1,0,0,44)
     row.BackgroundColor3 = Color3.fromRGB(12,12,12)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,11)
-    local rst = Instance.new("UIStroke",row); rst.Color = Color3.fromRGB(220,20,20); rst.Transparency = 0.95; rst.Thickness = 1
+    safeUICorner(row, UDim.new(0,11))
+    local rst = safeUIStroke(row, Color3.fromRGB(220,20,20), 1, 0.95)
     mkLabel(row,icon,UDim2.new(0,32,1,0),UDim2.new(0,8,0,0),14,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),1,Enum.TextXAlignment.Center)
     mkLabel(row,txt,UDim2.new(1,-90,1,0),UDim2.new(0,36,0,0),12,nil,Color3.fromRGB(200,200,200),1,Enum.TextXAlignment.Left)
 
@@ -2524,13 +2546,13 @@ local function toggle(icon, txt, onFn, key)
     track.Position = UDim2.new(1,-50,0.5,-11)
     track.BackgroundColor3 = Color3.fromRGB(24,24,24)
     track.BorderSizePixel = 0
-    Instance.new("UICorner",track).CornerRadius = UDim.new(1,0)
+    safeUICorner(track, UDim.new(1,0))
     local thumb = Instance.new("Frame",track)
     thumb.Size = UDim2.new(0,16,0,16)
     thumb.Position = UDim2.new(0,3,0.5,-8)
     thumb.BackgroundColor3 = Color3.fromRGB(100,100,100)
     thumb.BorderSizePixel = 0
-    Instance.new("UICorner",thumb).CornerRadius = UDim.new(1,0)
+    safeUICorner(thumb, UDim.new(1,0))
 
     local on = false
     local ti = TweenInfo.new(0.18, Enum.EasingStyle.Quad)
@@ -2577,7 +2599,7 @@ local function actionBtn(txt, color, fn)
     b.Text = txt; b.TextColor3 = Color3.new(1,1,1)
     b.TextSize = 12; b.Font = Enum.Font.GothamBold
     b.BorderSizePixel = 0
-    Instance.new("UICorner",b).CornerRadius = UDim.new(0,7)
+    safeUICorner(b, UDim.new(0,7))
     b.MouseButton1Click:Connect(function()
         TweenService:Create(b,TweenInfo.new(0.08),{BackgroundColor3=Color3.fromRGB(255,30,30)}):Play()
         task.delay(0.15,function() TweenService:Create(b,TweenInfo.new(0.1),{BackgroundColor3=color}):Play() end)
@@ -2590,7 +2612,7 @@ local function slider(lbl, minV, maxV, defV, fn, key)
     row.Size = UDim2.new(1,0,0,52)
     row.BackgroundColor3 = Color3.fromRGB(12,12,12)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,9)
+    safeUICorner(row, UDim.new(0,9))
 
     mkLabel(row,lbl,UDim2.new(0.58,0,0,20),UDim2.new(0,10,0,4),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
     local vl = mkLabel(row,tostring(defV),UDim2.new(0.38,0,0,20),UDim2.new(0.6,0,0,4),12,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),1,Enum.TextXAlignment.Right)
@@ -2600,19 +2622,19 @@ local function slider(lbl, minV, maxV, defV, fn, key)
     trk.Position = UDim2.new(0,10,0,34)
     trk.BackgroundColor3 = Color3.fromRGB(24,24,24)
     trk.BorderSizePixel = 0
-    Instance.new("UICorner",trk).CornerRadius = UDim.new(1,0)
+    safeUICorner(trk, UDim.new(1,0))
     local pct = (defV-minV)/(maxV-minV)
     local fl = Instance.new("Frame",trk)
     fl.Size = UDim2.new(pct,0,1,0)
     fl.BackgroundColor3 = Color3.fromRGB(220,20,20)
     fl.BorderSizePixel = 0
-    Instance.new("UICorner",fl).CornerRadius = UDim.new(1,0)
+    safeUICorner(fl, UDim.new(1,0))
     local th = Instance.new("TextButton",trk)
     th.Size = UDim2.new(0,14,0,14)
     th.Position = UDim2.new(pct,-7,0.5,-7)
     th.BackgroundColor3 = Color3.fromRGB(240,240,240)
     th.Text = ""; th.BorderSizePixel = 0; th.ZIndex = 2
-    Instance.new("UICorner",th).CornerRadius = UDim.new(1,0)
+    safeUICorner(th, UDim.new(1,0))
 
     local function setSlider(v)
         v = math.clamp(math.floor(tonumber(v) or defV), minV, maxV)
@@ -2644,13 +2666,13 @@ local function checkRow(labelText, getState, setState, indent)
     row.Size = UDim2.new(1,0,0,26)
     row.BackgroundColor3 = Color3.fromRGB(10,10,10)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
+    safeUICorner(row, UDim.new(0,6))
     local x = indent or 12
     local box = Instance.new("Frame",row)
     box.Size = UDim2.new(0,16,0,16)
     box.Position = UDim2.new(0,x,0.5,-8)
     box.BorderSizePixel = 0
-    Instance.new("UICorner",box).CornerRadius = UDim.new(0,4)
+    safeUICorner(box, UDim.new(0,4))
     local check = mkLabel(box,"",UDim2.new(1,0,1,0),UDim2.new(0,0,0,-1),13,Enum.Font.GothamBold,Color3.new(1,1,1),2,Enum.TextXAlignment.Center)
     mkLabel(row,labelText,UDim2.new(1,-(x+30),1,0),UDim2.new(0,x+24,0,0),11,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
     local btn = Instance.new("TextButton",row)
@@ -2671,7 +2693,7 @@ local function numberInput(labelText, default, onChange, key)
     row.Size = UDim2.new(1,0,0,38)
     row.BackgroundColor3 = Color3.fromRGB(12,12,12)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
+    safeUICorner(row, UDim.new(0,8))
     mkLabel(row,labelText,UDim2.new(0.55,0,1,0),UDim2.new(0,12,0,0),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
     local box = Instance.new("TextBox",row)
     box.Size = UDim2.new(0,96,0,24); box.Position = UDim2.new(1,-106,0.5,-12)
@@ -2679,8 +2701,8 @@ local function numberInput(labelText, default, onChange, key)
     box.Text = tostring(default); box.TextColor3 = Color3.new(1,1,1); box.TextSize = 12
     box.Font = Enum.Font.GothamBold; box.ClearTextOnFocus = false
     box.PlaceholderText = "any number"
-    Instance.new("UICorner",box).CornerRadius = UDim.new(0,6)
-    local st = Instance.new("UIStroke",box); st.Color = Color3.fromRGB(220,20,20); st.Transparency = 0.6; st.Thickness = 1
+    safeUICorner(box, UDim.new(0,6))
+    local st = safeUIStroke(box, Color3.fromRGB(220,20,20), 1, 0.6)
     box.FocusLost:Connect(function()
         local n = tonumber(box.Text)
         if n then onChange(n); box.Text = tostring(n) else box.Text = tostring(default) end
@@ -2698,8 +2720,8 @@ local function labelRow(labelText, defaultVal)
     row.Size = UDim2.new(1,0,0,36)
     row.BackgroundColor3 = Color3.fromRGB(12,12,12)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
-    local rst = Instance.new("UIStroke",row); rst.Color = Color3.fromRGB(220,20,20); rst.Transparency = 0.95; rst.Thickness = 1
+    safeUICorner(row, UDim.new(0,8))
+    local rst = safeUIStroke(row, Color3.fromRGB(220,20,20), 1, 0.95)
     
     mkLabel(row, labelText, UDim2.new(0.6,0,1,0), UDim2.new(0,12,0,0), 12, nil, Color3.fromRGB(180,180,180), 1, Enum.TextXAlignment.Left)
     local valLabel = mkLabel(row, defaultVal, UDim2.new(0.35,0,1,0), UDim2.new(0.6,0,0,0), 12, Enum.Font.GothamBold, Color3.fromRGB(220,20,20), 1, Enum.TextXAlignment.Right)
@@ -2720,8 +2742,8 @@ local function dropdown(titleText, items, getState, setState, key)
     holder.BorderSizePixel = 0
     holder.ClipsDescendants = true
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",holder).CornerRadius = UDim.new(0,10)
-    local hst = Instance.new("UIStroke",holder); hst.Color = Color3.fromRGB(220,20,20); hst.Transparency = 0.8; hst.Thickness = 1
+    safeUICorner(holder, UDim.new(0,10))
+    local hst = safeUIStroke(holder, Color3.fromRGB(220,20,20), 1, 0.8)
 
     local head = Instance.new("Frame",holder)
     head.Size = UDim2.new(1,0,0,headH); head.BackgroundTransparency = 1
@@ -2751,7 +2773,7 @@ local function dropdown(titleText, items, getState, setState, key)
         b.Size = UDim2.new(0,54,1,0); b.Position = UDim2.new(0,xs,0,0)
         b.BackgroundColor3 = Color3.fromRGB(24,24,24); b.BorderSizePixel = 0
         b.Text = txt; b.TextColor3 = Color3.fromRGB(180,180,180); b.TextSize = 10; b.Font = Enum.Font.GothamBold
-        Instance.new("UICorner",b).CornerRadius = UDim.new(0,6)
+        safeUICorner(b, UDim.new(0,6))
         b.MouseButton1Click:Connect(fn)
     end
     quickBtn("All",0,function() for _,it in ipairs(items) do setState(it,true) end for _,r in ipairs(refreshers) do r() end updateBadge() end)
@@ -2760,10 +2782,10 @@ local function dropdown(titleText, items, getState, setState, key)
     for i,it in ipairs(items) do
         local row = Instance.new("Frame",content)
         row.Size = UDim2.new(1,0,0,rowH); row.BackgroundColor3 = Color3.fromRGB(16,16,16); row.BorderSizePixel = 0; row.LayoutOrder = i
-        Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
+        safeUICorner(row, UDim.new(0,6))
         local cb = Instance.new("Frame",row)
         cb.Size = UDim2.new(0,16,0,16); cb.Position = UDim2.new(0,8,0.5,-8); cb.BorderSizePixel = 0
-        Instance.new("UICorner",cb).CornerRadius = UDim.new(0,4)
+        safeUICorner(cb, UDim.new(0,4))
         local ck = mkLabel(cb,"",UDim2.new(1,0,1,0),UDim2.new(0,0,0,-1),12,Enum.Font.GothamBold,Color3.new(1,1,1),2,Enum.TextXAlignment.Center)
         mkLabel(row,it,UDim2.new(1,-34,1,0),UDim2.new(0,32,0,0),11,nil,Color3.fromRGB(180,180,180),1)
         local rb = Instance.new("TextButton",row); rb.Size = UDim2.new(1,0,1,0); rb.BackgroundTransparency = 1; rb.Text = ""
@@ -2811,8 +2833,8 @@ local function teleportDropdown(titleText, items, onSelect)
     holder.BorderSizePixel = 0
     holder.ClipsDescendants = true
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",holder).CornerRadius = UDim.new(0,10)
-    local hst = Instance.new("UIStroke",holder); hst.Color = Color3.fromRGB(220,20,20); hst.Transparency = 0.8; hst.Thickness = 1
+    safeUICorner(holder, UDim.new(0,10))
+    local hst = safeUIStroke(holder, Color3.fromRGB(220,20,20), 1, 0.8)
 
     local head = Instance.new("Frame",holder)
     head.Size = UDim2.new(1,0,0,headH); head.BackgroundTransparency = 1
@@ -2840,7 +2862,7 @@ local function teleportDropdown(titleText, items, onSelect)
     for i, it in ipairs(items) do
         local row = Instance.new("Frame",content)
         row.Size = UDim2.new(1,0,0,rowH); row.BackgroundColor3 = Color3.fromRGB(16,16,16); row.BorderSizePixel = 0; row.LayoutOrder = i
-        Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
+        safeUICorner(row, UDim.new(0,6))
         mkLabel(row,"»  " .. it,UDim2.new(1,-16,1,0),UDim2.new(0,10,0,0),11,Enum.Font.GothamBold,Color3.fromRGB(180,180,180),1)
         local rb = Instance.new("TextButton",row); rb.Size = UDim2.new(1,0,1,0); rb.BackgroundTransparency = 1; rb.Text = ""
         rb.MouseButton1Click:Connect(function()
@@ -3186,7 +3208,7 @@ local nameRow = Instance.new("Frame", SC)
 nameRow.Size = UDim2.new(1,0,0,38)
 nameRow.BackgroundColor3 = Color3.fromRGB(12,12,12)
 nameRow.BorderSizePixel = 0; nameRow.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-Instance.new("UICorner",nameRow).CornerRadius = UDim.new(0,8)
+safeUICorner(nameRow, UDim.new(0,8))
 mkLabel(nameRow,"Profile Name",UDim2.new(0.4,0,1,0),UDim2.new(0,12,0,0),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
 local nameBox = Instance.new("TextBox",nameRow)
 nameBox.Size = UDim2.new(0,150,0,24); nameBox.Position = UDim2.new(1,-160,0.5,-12)
@@ -3194,8 +3216,8 @@ nameBox.BackgroundColor3 = Color3.fromRGB(20,20,20); nameBox.BorderSizePixel = 0
 nameBox.Text = ""; nameBox.PlaceholderText = "My Setup"
 nameBox.TextColor3 = Color3.new(1,1,1); nameBox.TextSize = 12
 nameBox.Font = Enum.Font.GothamBold; nameBox.ClearTextOnFocus = false
-Instance.new("UICorner",nameBox).CornerRadius = UDim.new(0,6)
-local nst = Instance.new("UIStroke",nameBox); nst.Color = Color3.fromRGB(220,20,20); nst.Transparency = 0.6; nst.Thickness = 1
+safeUICorner(nameBox, UDim.new(0,6))
+local nst = safeUIStroke(nameBox, Color3.fromRGB(220,20,20), 1, 0.6)
 
 actionBtn("Save / Create Profile", Color3.fromRGB(180,20,20), function()
     local nm = sanitize(nameBox.Text)
@@ -3233,13 +3255,13 @@ rebuildList = function()
         local r = Instance.new("Frame",listHolder)
         r.Size = UDim2.new(1,0,0,30); r.BackgroundColor3 = Color3.fromRGB(14,14,14)
         r.BorderSizePixel = 0; r.LayoutOrder = i
-        Instance.new("UICorner",r).CornerRadius = UDim.new(0,7)
+        safeUICorner(r, UDim.new(0,7))
         mkLabel(r,"»  "..name,UDim2.new(1,-100,1,0),UDim2.new(0,10,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),1,Enum.TextXAlignment.Left)
         local lb = Instance.new("TextButton",r)
         lb.Size = UDim2.new(0,56,0,22); lb.Position = UDim2.new(1,-90,0.5,-11)
         lb.BackgroundColor3 = Color3.fromRGB(180,20,20); lb.BorderSizePixel = 0
         lb.Text = "Load"; lb.TextColor3 = Color3.new(1,1,1); lb.TextSize = 11; lb.Font = Enum.Font.GothamBold
-        Instance.new("UICorner",lb).CornerRadius = UDim.new(0,6)
+        safeUICorner(lb, UDim.new(0,6))
         lb.MouseButton1Click:Connect(function()
             if applyProfile(name) then
                 nameBox.Text = name
@@ -3252,7 +3274,7 @@ rebuildList = function()
         db.Size = UDim2.new(0,24,0,22); db.Position = UDim2.new(1,-28,0.5,-11)
         db.BackgroundColor3 = Color3.fromRGB(30,30,30); db.BorderSizePixel = 0
         db.Text = "✕"; db.TextColor3 = Color3.fromRGB(220,20,20); db.TextSize = 12; db.Font = Enum.Font.GothamBold
-        Instance.new("UICorner",db).CornerRadius = UDim.new(0,6)
+        safeUICorner(db, UDim.new(0,6))
         db.MouseButton1Click:Connect(function()
             deleteProfile(name); State.status = "[Profiles] Deleted: " .. name; rebuildList()
         end)
@@ -3265,7 +3287,7 @@ local ft = Instance.new("Frame",SC)
 ft.Size = UDim2.new(1,0,0,22)
 ft.BackgroundColor3 = Color3.fromRGB(10,10,10)
 ft.BorderSizePixel = 0; ft.LayoutOrder = 999
-Instance.new("UICorner",ft).CornerRadius = UDim.new(0,6)
+safeUICorner(ft, UDim.new(0,6))
 mkLabel(ft,"Storage Hunters AutoFarm v3  |  MCP Crafted",UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),9,nil,Color3.fromRGB(100,100,100),1,Enum.TextXAlignment.Center)
 
 -- Minimize/Close
@@ -3524,3 +3546,40 @@ TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirect
 local plotName = State.myPlot and State.myPlot.Name or "Searching..."
 State.status = "[System] Ready! Plot: " .. plotName
 warn("[SH AutoFarm v3] Loaded! Plot:", plotName)
+
+
+end)
+
+if not success then
+    pcall(function()
+        local player = game:GetService("Players").LocalPlayer
+        local PlayerGui = player and player:WaitForChild("PlayerGui", 5)
+        if PlayerGui then
+            if PlayerGui:FindFirstChild("SH_AF_CRASH") then PlayerGui.SH_AF_CRASH:Destroy() end
+            
+            local sg = Instance.new("ScreenGui")
+            sg.Name = "SH_AF_CRASH"
+            sg.ResetOnSpawn = false
+            sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+            sg.Parent = PlayerGui
+            
+            local f = Instance.new("Frame", sg)
+            f.Size = UDim2.new(1, 0, 1, 0)
+            f.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+            f.BorderSizePixel = 0
+            
+            local l = Instance.new("TextLabel", f)
+            l.Size = UDim2.new(1, -40, 1, -40)
+            l.Position = UDim2.new(0, 20, 0, 20)
+            l.Text = "Hudas Hub Auto-Farm v3 Crashed at Startup!\n\nError:\n" .. tostring(err) .. "\n\nPlease screenshot this screen and send it to the developer."
+            l.TextColor3 = Color3.fromRGB(220, 20, 20)
+            l.TextSize = 14
+            l.TextWrapped = true
+            l.Font = Enum.Font.Code
+            l.TextXAlignment = Enum.TextXAlignment.Left
+            l.TextYAlignment = Enum.TextYAlignment.Top
+            l.BackgroundTransparency = 1
+        end
+    end)
+    warn("[SH AutoFarm] CRASH DETECTED:", err)
+end

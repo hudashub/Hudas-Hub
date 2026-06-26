@@ -1,0 +1,3229 @@
+-- ═══════════════════════════════════════════════════════════════════
+--  STORAGE HUNTERS: OPEN WORLD — AUTO FARM SCRIPT v3
+--  Fixed: Auto Sell from Inventory | Auto Pickup via ProximityPrompts
+--  Correct bid params from decompiled LocalAuctionHandler
+-- ═══════════════════════════════════════════════════════════════════
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RS               = game:GetService("ReplicatedStorage")
+local WS               = game:GetService("Workspace")
+local VR               = game:GetService("VirtualUser")
+local PPS              = game:GetService("ProximityPromptService")
+local HttpService      = game:GetService("HttpService")
+
+-- ─── INSTANCE CLEANUP ─────────────────────────────────────────────────
+-- Executor reloads do NOT kill the previous run's event connections / loops,
+-- so an old auto-bidder keeps firing in the background (bidding even when the
+-- new GUI shows it OFF). We register everything global and tear the old one
+-- down on each load.
+if _G.__SH_AF_CLEANUP then pcall(_G.__SH_AF_CLEANUP) end
+local _CONNS, _THREADS = {}, {}
+local function track(conn) table.insert(_CONNS, conn); return conn end
+local function trackThread(t) table.insert(_THREADS, t); return t end
+_G.__SH_AF_CLEANUP = function()
+    for _, c in ipairs(_CONNS)   do pcall(function() c:Disconnect() end) end
+    for _, t in ipairs(_THREADS) do pcall(function() task.cancel(t) end) end
+    _CONNS, _THREADS = {}, {}
+end
+
+local player    = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local rootPart  = character:WaitForChild("HumanoidRootPart")
+local State, hasPendingPriorities
+local Items, MutatorMod, Grading
+pcall(function() Items      = require(RS.Modules.Items) end)
+pcall(function() MutatorMod = require(RS.Modules.MutatorModule) end)
+pcall(function() Grading    = require(RS.Modules.GameConfig).Grading end)
+
+track(player.CharacterAdded:Connect(function(c)
+    character = c
+    rootPart = c:WaitForChild("HumanoidRootPart")
+end))
+
+-- ─── REMOTES (verified paths) ─────────────────────────────────────────
+local Events    = RS:WaitForChild("Events")
+local AucFolder = Events:WaitForChild("Auction")
+local PlotFolder= Events:WaitForChild("Plot")
+local DragFolder= Events:WaitForChild("Dragging")
+
+local R = {} -- All remotes in one table to avoid local register overflow
+
+-- Auction
+R.BidRemote        = AucFolder:WaitForChild("Bid")
+R.UpdateWinBid     = AucFolder:WaitForChild("UpdateCurrentWinningBid")
+R.ToggleBiddingUI  = AucFolder:WaitForChild("ToggleBiddingUI")
+R.LeaveAuction     = AucFolder:WaitForChild("LeaveAuction")
+R.AuctionPickupStart = AucFolder:WaitForChild("AuctionPickupStart")
+R.AuctionPickupEnd   = AucFolder:WaitForChild("AuctionPickupEnd")
+
+-- Plot/Sell
+R.SellItemRemote = PlotFolder:WaitForChild("SellItem")
+R.PlaceItem      = PlotFolder:WaitForChild("PlaceItem")
+
+-- Pawn
+local PawnFolder       = Events:WaitForChild("Pawn")
+R.GetPawnState     = PawnFolder:WaitForChild("GetPawnState")
+R.RateChanged      = PawnFolder:WaitForChild("RateChanged")
+R.GetSellableItems = PawnFolder:WaitForChild("GetSellableItems")
+R.SellItems        = PawnFolder:WaitForChild("SellItems")
+
+-- Wash / Cleaning
+local WashFolder       = Events:WaitForChild("Wash")
+R.GetSlotState     = WashFolder:WaitForChild("GetSlotState")
+R.GetWashableItems = WashFolder:WaitForChild("GetWashableItems")
+R.StartWash        = WashFolder:WaitForChild("StartWash")
+R.CollectWash      = WashFolder:WaitForChild("CollectWash")
+R.ClaimWashedItem  = WashFolder:WaitForChild("ClaimWashedItem")
+
+-- Grading
+local GradeFolder       = Events:WaitForChild("Grading")
+R.GetGradeSlotState = GradeFolder:WaitForChild("GetSlotState")
+R.GetGradableItems  = GradeFolder:WaitForChild("GetGradableItems")
+R.StartGrading      = GradeFolder:WaitForChild("StartGrading")
+R.CollectGrade      = GradeFolder:WaitForChild("CollectGrade")
+R.ClaimGradedItem   = GradeFolder:WaitForChild("ClaimGradedItem")
+
+-- Locksmith
+local LocksmithFolder     = Events:WaitForChild("Locksmith")
+R.GetLocksmithSlotState = LocksmithFolder:WaitForChild("GetSlotState")
+R.GetLockableItems    = LocksmithFolder:WaitForChild("GetLockableItems")
+R.StartLocksmith      = LocksmithFolder:WaitForChild("StartLocksmith")
+R.OpenSafe            = LocksmithFolder:WaitForChild("OpenSafe")
+R.ClaimLocksmithItem  = LocksmithFolder:WaitForChild("ClaimItem")
+R.PicklockInventorySafe = LocksmithFolder:WaitForChild("PicklockInventorySafe")
+R.BuyLockpick         = Events:WaitForChild("LockpickShop"):WaitForChild("BuyLockpick")
+
+-- ─── GARAGE DISCOVERY ─────────────────────────────────────────────────
+local function discoverAllGarages()
+    local debris = WS:FindFirstChild("_Debris")
+    local garages = debris and debris:FindFirstChild("Garages")
+    local found = {}
+    if garages then
+        for _, g in ipairs(garages:GetChildren()) do
+            found[g.Name] = true
+        end
+    end
+    
+    local defaultNames = {
+        "Barn Garage",
+        "Camo Shop Front",
+        "Large Container Garage",
+        "Scrap Garage 2",
+        "Scrap Garage 3",
+        "Shop Front",
+        "Small Container Garage",
+        "Stable Garage",
+        "Warehouse Garage"
+    }
+    for _, name in ipairs(defaultNames) do
+        found[name] = true
+    end
+    
+    local sorted = {}
+    for name in pairs(found) do
+        table.insert(sorted, name)
+    end
+    table.sort(sorted)
+    return sorted
+end
+
+local DiscoveredContainers = discoverAllGarages()
+
+local function getAllMutations()
+    local list = { "All" }
+    local seen = {}
+    
+    if MutatorMod then
+        if type(MutatorMod.Mutations) == "table" then
+            for _, m in ipairs(MutatorMod.Mutations) do
+                if m.Name and not seen[m.Name] then
+                    seen[m.Name] = true
+                    table.insert(list, m.Name)
+                end
+            end
+        end
+        if type(MutatorMod.TimeMutations) == "table" then
+            for _, m in ipairs(MutatorMod.TimeMutations) do
+                if m.Name and not seen[m.Name] then
+                    seen[m.Name] = true
+                    table.insert(list, m.Name)
+                end
+            end
+        end
+        if type(MutatorMod.EventMutations) == "table" then
+            for _, m in ipairs(MutatorMod.EventMutations) do
+                if m.Name and not seen[m.Name] then
+                    seen[m.Name] = true
+                    table.insert(list, m.Name)
+                end
+            end
+        end
+        if type(MutatorMod._kinds) == "table" then
+            for name, _ in pairs(MutatorMod._kinds) do
+                if not seen[name] then
+                    seen[name] = true
+                    table.insert(list, name)
+                end
+            end
+        end
+    end
+    
+    if #list <= 1 then
+        local defaults = { "Silver", "Gold", "Corrupted", "Diamond", "Gem", "Chrome", "Hologram", "Black", "Void", "Secret", "Rainbow", "Cobwebbed", "Antique", "Ancient", "Timeless", "Moonlit", "Firefly", "Wet", "Shocked", "Pure", "Spotless", "Tiny", "Huge" }
+        for _, name in ipairs(defaults) do
+            table.insert(list, name)
+        end
+    end
+    table.sort(list)
+    for i, v in ipairs(list) do
+        if v == "All" then
+            table.remove(list, i)
+            break
+        end
+    end
+    table.insert(list, 1, "All")
+    return list
+end
+
+local DiscoveredMutations = getAllMutations()
+
+local AccessoryIdToDisplay = {}
+local function getAllAccessoryModifiers()
+    local list = { "All" }
+    local seen = {}
+    
+    local ok, AccAttrs = pcall(function() return require(RS.Modules.AccessoryAttributes) end)
+    if ok and AccAttrs and type(AccAttrs.Definitions) == "table" then
+        for id, def in pairs(AccAttrs.Definitions) do
+            local name = def.Display or id
+            if not seen[name] then
+                seen[name] = id
+                table.insert(list, name)
+            end
+        end
+    end
+    
+    if #list <= 1 then
+        local defaults = { "Luck", "Bid Recovery", "Bid Arrow Speed", "Bid Zone Width", "Tip Chance", "NPC Offers Bonus", "Vehicle Speed", "Vehicle Acceleration", "Walkspeed", "Energy Drink Time" }
+        for _, name in ipairs(defaults) do
+            table.insert(list, name)
+        end
+    end
+    table.sort(list)
+    for i, v in ipairs(list) do
+        if v == "All" then
+            table.remove(list, i)
+            break
+        end
+    end
+    table.insert(list, 1, "All")
+    
+    -- Populate reverse lookup map
+    for display, id in pairs(seen) do
+        AccessoryIdToDisplay[id] = display
+    end
+    -- Also map standard display names back to themselves as fallbacks
+    for _, name in ipairs(list) do
+        AccessoryIdToDisplay[name:gsub("%s+", "")] = name
+    end
+    
+    return list
+end
+
+local DiscoveredAccessoryModifiers = getAllAccessoryModifiers()
+
+-- ─── TELEPORT LOCATIONS ───────────────────────────────────────────────
+local TeleportLocations = {
+    ["Back Alley"] = Vector3.new(-465.85, 1721.05, -348.42),
+    ["Farmyard"] = Vector3.new(-189.6, 1720.44, -1253.07),
+    ["Junk Yard"] = Vector3.new(-97.25, 1721.1, -31.85),
+    ["Shipyard"] = Vector3.new(-601.78, 1720.89, 632.53),
+    ["Shopping Mall"] = Vector3.new(308.09, 1720.39, -268.12)
+}
+
+local function performTeleport(placeName)
+    if not rootPart then
+        State.status = "⚠️ Character RootPart not found"
+        return
+    end
+    
+    local pos = TeleportLocations[placeName]
+    if placeName == "My Plot" then
+        local plot = State.myPlot or findMyPlot()
+        if plot then
+            local base = plot:FindFirstChild("Base")
+            local floor = base and (base:IsA("BasePart") and base or base:FindFirstChild("Floor") or base:FindFirstChildWhichIsA("BasePart", true)) or plot:FindFirstChildWhichIsA("BasePart", true)
+            pos = floor and floor.Position or plot:GetPivot().Position
+        else
+            State.status = "⚠️ My Plot not found in world"
+            return
+        end
+    end
+    
+    if pos then
+        State.status = "✈️ Teleporting to " .. placeName
+        rootPart.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    else
+        State.status = "⚠️ Unknown place: " .. tostring(placeName)
+    end
+end
+
+-- ─── STATE ───────────────────────────────────────────────────────────
+State = {
+    AutoContainerFarm = false,
+    AutoCollectLost = false,
+    AutoFavorite = false,
+    AutoFavoritePrice = 50000,
+    AutoGavelFavorite = false,
+    AutoGavelMinPercent = 100,
+    SelectedGavelMutations = {},
+    AutoAccessoryFavorite = false,
+    AutoAccessoryMinPercent = 100,
+    SelectedAccessoryModifiers = {},
+    SelectedContainers = {},
+    AutoStartAuction = false,
+    AutoBidWin  = false,
+    AutoSellInv = false,
+    AutoPickup  = false,
+    AutoUnload  = false,
+    UnloadScanDelay = 2,      -- seconds between auto-unload scans
+    AutoShelf   = false,
+    AutoCleanHighest = false,
+    AutoGradeHighest = false,
+    AutoLocksmith = false,
+    AutoLockpickSafe = false,
+    SelectedSafes = {},
+    AutoFavoriteSafe = false,
+    SelectedFavoriteSafes = {},
+    SellInventory = false,
+    ShelfScanDelay  = 1.5,    -- seconds between auto-shelf scans
+    ShelfPlaceDelay = 0.15,   -- small delay between placements (snappy, avoids rate-limit)
+    ShelfFilterPrice = false, -- only shelve items BELOW ShelfMaxPrice (keep valuable ones)
+    ShelfMaxPrice    = 1000,  -- value >= this stays in inventory; below this gets shelved
+    PrioritizeHeavy  = false, -- unload/shelf the HEAVIEST items first (descending weight)
+    AntiAFK     = false,
+    SpeedHack   = false,
+    MaxBid      = 50000,
+    AutoBidFilterPrice = false,   -- only bid when the auction's current bid is high enough
+    AutoBidMinValue    = 1000,    -- skip auctions whose current bid is below this
+    BidDelay    = 0.15,
+    SellDelay   = 0.25,
+    WalkSpeed   = 50,
+    PickupScanDelay   = 0.4,   -- seconds between backup pickup scans
+    itemsPicked       = 0,
+    -- pickup filters (only pick items that pass every ENABLED filter)
+    FilterPrice    = false,
+    MinPrice       = 100,      -- pick only if value >= this (no upper limit)
+    FilterRarity   = false,
+    RarityAllow    = {},
+    FilterMutation = false,
+    MutationAllow  = {},       -- mutation name -> true ; "(Normal)" = items with no mutation
+    -- runtime
+    currentBid     = 0,
+    inAuction      = false,
+    pickupPhase    = false,
+    currentGarage  = nil,
+    myPlot         = nil,
+    earnings       = 0,
+    itemsSold      = 0,
+    bidsWon        = 0,
+    status         = "Idle",
+}
+
+-- ─── HELPERS ─────────────────────────────────────────────────────────
+local function fmt(n)
+    n = tonumber(n) or 0
+    if n >= 1e6 then return string.format("%.1fM", n/1e6)
+    elseif n >= 1e3 then return string.format("%.1fK", n/1e3)
+    else return tostring(math.floor(n)) end
+end
+
+local function formatEarnings(n)
+    n = tonumber(n) or 0
+    local formatted = string.format("%.2f", n)
+    local left, right = formatted:match("^(%-?%d+)(%.%d+)$")
+    while true do
+        local k
+        left, k = left:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
+        if k == 0 then break end
+    end
+    return left .. right
+end
+
+local function findMyPlot()
+    local plots = WS:FindFirstChild("_Plots")
+    if not plots then return nil end
+    for _, p in ipairs(plots:GetChildren()) do
+        -- plots are tagged with the owner's UserId attribute (not an Owner ObjectValue)
+        if p:GetAttribute("OwnerUserId") == player.UserId then return p end
+    end
+    return nil
+end
+
+-- ─── AUTO BID WIN ─────────────────────────────────────────────────────
+-- Live signature (verified via remote spy): UpdateCurrentWinningBid(currentBid, winnerName, bidderChar, nextBidPrice, garageModel)
+local bidConn, auctionOpenConn
+local function startAutoBid()
+    if bidConn then bidConn:Disconnect() end
+    if auctionOpenConn then auctionOpenConn:Disconnect() end
+
+    -- Hook UpdateCurrentWinningBid — outbid whoever is winning
+    bidConn = R.UpdateWinBid.OnClientEvent:Connect(function(currentBid, winnerName, bidderChar, nextBidPrice, garageModel)
+        if not State.inAuction then return end
+
+        if not State.AutoBidWin then return end
+        if winnerName == player.Name then return end -- already winning
+
+        -- Price filter: only join auctions whose CURRENT bid is at/above the threshold
+        local curr = tonumber(currentBid) or 0
+        if State.AutoBidFilterPrice and curr < State.AutoBidMinValue then
+            State.status = "💲 Skip: bid $" .. fmt(curr) .. " < min $" .. fmt(State.AutoBidMinValue)
+            task.spawn(function()
+                pcall(function() R.LeaveAuction:InvokeServer() end)
+            end)
+            return
+        end
+
+        local nextBid = (tonumber(nextBidPrice) or curr + 1)
+        if nextBid <= State.MaxBid then
+            task.delay(State.BidDelay, function()
+                if State.AutoBidWin and State.inAuction then
+                    pcall(function() R.BidRemote:FireServer(nextBid) end)
+                    State.currentBid = nextBid
+                    State.status = "🔨 Bid: $" .. fmt(nextBid)
+                end
+            end)
+        else
+            State.status = "⚠️ Max bid $" .. fmt(State.MaxBid) .. " reached"
+        end
+    end)
+
+    -- Hook ToggleBiddingUI — know when auction starts/ends
+    auctionOpenConn = R.ToggleBiddingUI.OnClientEvent:Connect(function(open)
+        State.inAuction = open
+        if open then
+            State.currentBid = 0
+            State.status = "🏪 Auction open — bidding!"
+            -- Skip the blind $1 opening bid when the price filter is on — wait until the
+            -- current bid climbs to the threshold (handled in UpdateWinBid above).
+            if State.AutoBidWin and not State.AutoBidFilterPrice then
+                -- Place an opening bid immediately
+                task.delay(0.6, function()
+                    if State.inAuction and State.AutoBidWin then
+                        pcall(function() R.BidRemote:FireServer(1) end)
+                    end
+                end)
+            end
+        else
+            if State.currentBid > 0 then
+                State.bidsWon = State.bidsWon + 1
+                State.status = "🏆 Won! (" .. State.bidsWon .. " total)"
+            else
+                State.status = "Auction ended"
+            end
+            State.currentBid = 0
+            State.currentGarage = nil
+        end
+    end)
+    track(bidConn); track(auctionOpenConn)
+end
+
+-- ─── AUTO START AUCTION (step on a pad → start it) ────────────────────
+-- Fires the "Start Auction" ProximityPrompt (named EnterAuction) the moment you
+-- walk onto an auction pad, so auctions begin hands-free.
+local startAuctionThread, startAuctionConn, startAuctionUIConn
+local startAuctionCooldown = 0
+local auctionUIOpen = false
+
+local function tryStartAuction(prompt)
+    if not State.AutoStartAuction or auctionUIOpen then return end
+    if not prompt or prompt.Name ~= "EnterAuction" or not prompt.Enabled then return end
+    if os.clock() < startAuctionCooldown then return end
+    local part = prompt.Parent
+    if part and part:IsA("BasePart") and rootPart
+        and (part.Position - rootPart.Position).Magnitude > prompt.MaxActivationDistance then
+        return   -- only when you're actually standing on the pad
+    end
+    startAuctionCooldown = os.clock() + 3
+    pcall(function() fireproximityprompt(prompt) end)
+    State.status = "🏁 Auto-started auction"
+end
+
+local function startAutoStartAuction()
+    if startAuctionThread then pcall(task.cancel, startAuctionThread) end
+    if startAuctionConn then startAuctionConn:Disconnect() end
+    if startAuctionUIConn then startAuctionUIConn:Disconnect() end
+    auctionUIOpen = false
+    -- know when a bidding UI is open so we don't restart mid-auction
+    startAuctionUIConn = R.ToggleBiddingUI.OnClientEvent:Connect(function(open) auctionUIOpen = open end)
+    -- instant: the prompt shows the moment you step onto a pad
+    startAuctionConn = PPS.PromptShown:Connect(function(prompt) tryStartAuction(prompt) end)
+    -- backup sweep of the auction pads
+    startAuctionThread = task.spawn(function()
+        while State.AutoStartAuction do
+            if not auctionUIOpen and rootPart then
+                local debris  = WS:FindFirstChild("_Debris")
+                local garages = debris and debris:FindFirstChild("Garages")
+                if garages then
+                    for _, g in ipairs(garages:GetChildren()) do
+                        if not State.AutoStartAuction then break end
+                        local prompt = g:FindFirstChild("EnterAuction", true)
+                        if prompt and prompt:IsA("ProximityPrompt") then tryStartAuction(prompt) end
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+    track(startAuctionConn); track(startAuctionUIConn); trackThread(startAuctionThread)
+end
+
+-- ─── AUTO SELL FROM INVENTORY ─────────────────────────────────────────
+-- Items in the player's dragging inventory are tracked server-side.
+-- We use GetDraggingInventory → SellItem(guid) for each one.
+-- Also scan the plot for placed items and sell those too.
+
+local function sellFromDraggingInventory()
+    local ok, inv = pcall(function()
+        return PlotFolder:WaitForChild("GetDraggingInventory"):InvokeServer()
+    end)
+    if ok and type(inv) == "table" then
+        local count = 0
+        for guid, itemData in pairs(inv) do
+            if not State.AutoSellInv then break end
+            pcall(function() R.SellItemRemote:FireServer(guid) end)
+            local price = 0
+            if type(itemData) == "table" then
+                price = tonumber(itemData.StockPrice or itemData.Price or 0) or 0
+            end
+            State.itemsSold = State.itemsSold + 1
+            State.earnings = State.earnings + price
+            count = count + 1
+            task.wait(State.SellDelay)
+        end
+        return count
+    end
+    return 0
+end
+
+local function sellFromPlot()
+    local plot = State.myPlot or findMyPlot()
+    if not plot then return 0 end
+    State.myPlot = plot
+    local count = 0
+    for _, v in ipairs(plot:GetDescendants()) do
+        if not State.AutoSellInv then break end
+        local guid = v:GetAttribute("GUID")
+        -- Only sell items (not furniture/building parts)
+        local cat = v:GetAttribute("Category")
+        local isFurniture = cat == "Furniture" or cat == "Walls" or cat == "Roofs" or cat == "Floors"
+        if guid and not isFurniture then
+            local price = tonumber(v:GetAttribute("StockPrice")) or 0
+            pcall(function() R.SellItemRemote:FireServer(guid) end)
+            State.itemsSold = State.itemsSold + 1
+            State.earnings = State.earnings + price
+            count = count + 1
+            task.wait(State.SellDelay)
+        end
+    end
+    return count
+end
+
+local function sellAll()
+    State.status = "💵 Selling inventory..."
+    local c1 = sellFromDraggingInventory()
+    local c2 = sellFromPlot()
+    local total = c1 + c2
+    if total > 0 then
+        State.status = "✅ Sold " .. total .. " items | Total: $" .. fmt(State.earnings)
+    else
+        State.status = "📭 Nothing to sell"
+    end
+end
+
+local sellThread
+local function startAutoSell()
+    if sellThread then task.cancel(sellThread) end
+    sellThread = task.spawn(function()
+        while State.AutoSellInv do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
+            sellAll()
+            task.wait(4)
+        end
+    end)
+    trackThread(sellThread)
+end
+
+-- ─── AUTO UNLOAD (vehicle → inventory when there's space) ──────────────
+-- Uses server remotes, so it works even when you are NOT in the vehicle and far
+-- from base. Unloads only while the inventory has free slots; if full it leaves
+-- the cargo in the vehicle (won't force-unload).
+local VehEvents     = Events:WaitForChild("Vehicles")
+R.GetVehItems   = VehEvents:WaitForChild("GetVehicleItems")
+R.TransferToInv = VehEvents:WaitForChild("TransferVehicleItemsToInventory")
+local UnloadItems   -- Items DB, for reading weights (heaviest-first option)
+pcall(function() UnloadItems = require(RS.Modules.Items) end)
+
+local function freeInvSpace()
+    local cap = player:GetAttribute("InventoryCap") or 0
+    local cnt = player:GetAttribute("InventoryCount") or 0
+    return math.max(0, cap - cnt)
+end
+
+local function myVehicles()
+    local out = {}
+    for _, m in ipairs(WS:GetChildren()) do
+        if m:GetAttribute("VehicleGUID") and m:GetAttribute("OwnerUserId") == player.UserId then
+            table.insert(out, m)
+        end
+    end
+    return out
+end
+
+local function doUnloadPass()
+    local free = freeInvSpace()
+    if free <= 0 then
+        State.status = "📦 Inventory full — holding cargo"
+        return 0
+    end
+    local moved = 0
+    for _, veh in ipairs(myVehicles()) do
+        if free <= 0 then break end
+        local vguid = veh:GetAttribute("VehicleGUID")
+        local ok, items = pcall(function() return R.GetVehItems:InvokeServer(vguid) end)
+        if ok and type(items) == "table" then
+            -- order the cargo; with Heaviest-First on, move the heaviest items first
+            local list = {}
+            for g, entry in pairs(items) do
+                local data = UnloadItems and UnloadItems[tostring(entry.ItemId)]
+                list[#list + 1] = { guid = g, weight = (data and data.Weight) or 0 }
+            end
+            if State.PrioritizeHeavy then
+                table.sort(list, function(a, b) return a.weight > b.weight end)
+            end
+            local guids = {}
+            for _, e in ipairs(list) do
+                guids[#guids + 1] = e.guid
+                if #guids >= free then break end   -- only take what fits
+            end
+            if #guids > 0 then
+                pcall(function() R.TransferToInv:FireServer(guids) end)
+                moved = moved + #guids
+                free  = free - #guids
+            end
+        end
+    end
+    if moved > 0 then State.status = "📦 Unloaded " .. moved .. " item(s)" end
+    return moved
+end
+
+local unloadThread
+local function startAutoUnload()
+    if unloadThread then pcall(task.cancel, unloadThread) end
+    unloadThread = task.spawn(function()
+        while State.AutoUnload do
+            doUnloadPass()
+            task.wait(State.UnloadScanDelay)
+        end
+    end)
+    trackThread(unloadThread)
+end
+
+-- ─── AUTO PICKUP (walk near → auto-collect) ─────────────────────────────
+-- Items live in Workspace._Carryables. Each is a Model with a Base part holding a
+-- ProximityPrompt: "PickupPrompt" (loose item, "Add to Vehicle") or "OpenBoxPrompt"
+-- (a box you open, which then drops a loose item picked up on the next pass).
+--
+-- Two hard rules learned from the live game:
+--   1) Pickup is server-authoritative — the server checks your REAL character
+--      position, so we can't grab from afar and we never teleport. We just auto-press
+--      the prompt while YOU walk near it (you must be grounded + within range).
+--   2) Every carryable has an "Owner" attribute (UserId of who won it). You can only
+--      collect your OWN items, so we skip everyone else's.
+--
+-- Primary path: hook ProximityPromptService.PromptShown — the game shows the prompt
+-- exactly when you're in range, so firing it the moment it appears = instant collect.
+-- Backup path: a light loop fires any owned prompt already within MaxActivationDistance.
+
+-- Each carryable Model has an "Owner" attribute = the UserId of whoever won it.
+-- You can ONLY collect your own items, so we skip everyone else's.
+local myUserId = player.UserId
+
+-- Carryables use two prompt types we care about:
+--   "PickupPrompt"  -> loose item, "Add to Vehicle"
+--   "OpenBoxPrompt" -> a box/crate you open (reveals a loose item, picked next pass)
+-- We fire ONLY these (never "Start Auction" / "Lost & Found" etc.).
+local GRAB_PROMPTS = { PickupPrompt = true, OpenBoxPrompt = true }
+
+local function carryableModelOf(prompt)
+    -- Prompt -> Base -> ItemModel
+    local base = prompt.Parent
+    local model = base and base.Parent
+    return model
+end
+
+local function isMine(model)
+    if not model then return false end
+    local owner = model:GetAttribute("Owner")
+    -- nil / 0 = free/unowned item; otherwise must match our UserId
+    return owner == nil or owner == 0 or owner == myUserId
+end
+
+-- ─── PICKUP FILTERS (price / rarity / mutation) ───────────────────────────
+-- Resolve an item model's real value, rarity and mutations the same way the game does:
+--   Items[ItemId]   -> BasePrice + Rarity
+--   MutatorModule:CalculatePriceForEntry(BasePrice, entry)  -> live value (w/ mutators+condition)
+
+local function resolveItemInfo(model)
+    if not model or not Items or not MutatorMod then return nil end
+    local ok, entry = pcall(function() return MutatorMod:BuildEntryFromAttributes(model) end)
+    if not ok or type(entry) ~= "table" then return nil end
+    local id     = tostring(entry.ItemId or model:GetAttribute("ItemId") or "")
+    local data   = Items[id]
+    local rarity = (data and data.Rarity) or "Uncommon"
+    local price  = 0
+    pcall(function() price = MutatorMod:CalculatePriceForEntry((data and data.BasePrice) or 0, entry) or 0 end)
+    if Grading and entry.Grade and Grading.GradeMultipliers and Grading.GradeMultipliers[entry.Grade] then
+        price = price * Grading.GradeMultipliers[entry.Grade]
+    end
+    -- collect mutation names present on the item
+    local mutations = {}
+    if type(entry.Mutators) == "table" then
+        for _, m in ipairs(entry.Mutators) do
+            local n = (type(m) == "table") and (m.name or m.Name) or tostring(m)
+            if n then mutations[n] = true end
+        end
+    end
+    pcall(function()
+        local sz = MutatorMod:GetSizeMutator(entry)
+        if sz then local n = sz.name or sz.Name; if n then mutations[n] = true end end
+    end)
+    return { price = price, rarity = rarity, mutations = mutations }
+end
+
+-- Returns true if the item passes every ENABLED filter (price/rarity/mutation).
+-- If the item info can't be resolved, fail open (don't block the pickup).
+local function passesFilters(model)
+    if not (State.FilterPrice or State.FilterRarity or State.FilterMutation) then return true end
+    local info = resolveItemInfo(model)
+    if not info then return true end
+    if State.FilterPrice and (info.price or 0) < State.MinPrice then return false end
+    if State.FilterRarity and not State.RarityAllow[info.rarity] then return false end
+    if State.FilterMutation then
+        local pass = false
+        if next(info.mutations) == nil then
+            pass = State.MutationAllow["(Normal)"] == true   -- item has no mutation
+        else
+            for name in pairs(info.mutations) do
+                if State.MutationAllow[name] then pass = true break end
+            end
+        end
+        if not pass then return false end
+    end
+    return true
+end
+
+-- Re-fire guard so one prompt isn't spammed every frame
+local lastFired = setmetatable({}, { __mode = "k" })
+local function tryGrab(prompt)
+    if not State.AutoPickup or not prompt or not GRAB_PROMPTS[prompt.Name] then return false end
+    if not prompt.Enabled then return false end
+    local model = carryableModelOf(prompt)
+    if not isMine(model) then return false end  -- only your own items
+    -- Filters apply to loose items you actually load. Boxes (OpenBoxPrompt) are always
+    -- opened first; the item they drop is then filtered on the next pass.
+    if prompt.Name == "PickupPrompt" and not passesFilters(model) then return false end
+    local now = os.clock()
+    if lastFired[prompt] and (now - lastFired[prompt]) < 0.4 then return false end
+    lastFired[prompt] = now
+    pcall(function() fireproximityprompt(prompt) end)
+    State.itemsPicked = (State.itemsPicked or 0) + 1
+    State.status = "🤲 Collected item (" .. State.itemsPicked .. ")"
+    return true
+end
+
+local function scanNearbyPrompts()
+    local carry = WS:FindFirstChild("_Carryables")
+    if not carry or not rootPart then return end
+    local origin = rootPart.Position
+    for _, item in ipairs(carry:GetChildren()) do
+        if not State.AutoPickup then break end
+        if isMine(item) then  -- skip other players' items
+            local base = item:FindFirstChild("Base") or item:FindFirstChildWhichIsA("BasePart")
+            -- find a grab-able prompt on this item
+            local prompt
+            for _, d in ipairs(item:GetDescendants()) do
+                if d:IsA("ProximityPrompt") and GRAB_PROMPTS[d.Name] then prompt = d break end
+            end
+            if base and prompt then
+                local d = (base.Position - origin).Magnitude
+                -- only fire if genuinely in the game's pickup range (server validates too)
+                if d <= prompt.MaxActivationDistance then
+                    tryGrab(prompt)
+                end
+            end
+        end
+    end
+end
+
+local pickupThread, promptShownConn
+local function startAutoPickup()
+    if pickupThread then pcall(task.cancel, pickupThread) end
+    if promptShownConn then promptShownConn:Disconnect() end
+
+    -- Instant-collect the moment a pickup prompt appears (you've walked into range)
+    promptShownConn = PPS.PromptShown:Connect(function(prompt)
+        tryGrab(prompt)
+    end)
+
+    -- Backup sweep for prompts already in range / that missed PromptShown
+    pickupThread = task.spawn(function()
+        while State.AutoPickup do
+            scanNearbyPrompts()
+            if (State.itemsPicked or 0) == 0 then
+                State.status = "🤲 Auto pickup ON — walk near items"
+            end
+            task.wait(State.PickupScanDelay)
+        end
+    end)
+    track(promptShownConn); trackThread(pickupThread)
+end
+
+-- ─── AUTO SHELF (inventory → shelf when there's a free slot) ───────────
+-- Server-authoritative, so it works far from base. We try to place each inventory
+-- item on a shelf slot and confirm by watching InventoryCount drop. If it doesn't
+-- drop, the item didn't fit (too big for the plot / shelf full / not sellable), so
+-- we leave it in the inventory and move on.
+local InvEvents    = Events:WaitForChild("Inventory")
+R.GetPlayerInv = InvEvents:WaitForChild("GetPlayerInventory")
+R.ToggleFavoriteItem = InvEvents:WaitForChild("ToggleFavoriteItem")
+R.PlaceStock   = PlotFolder:WaitForChild("PlaceStockItem")
+
+-- Sell EVERYTHING in the inventory — Tools AND Vehicles are shelvable (vehicles go on
+-- Large Floor Podiums). Nothing is skipped by category; keep what you want by
+-- favoriting it (favorites are never shelved). Functional gear lives in the hotbar,
+-- not the sellable inventory, so it's safe.
+local SKIP_SHELF_CAT = {}
+
+local function shelfSlots()
+    local plot = State.myPlot or findMyPlot()
+    State.myPlot = plot
+    local out = {}
+    if not plot then return out end
+    for _, d in ipairs(plot:GetDescendants()) do
+        if d:GetAttribute("IsShelf") then
+            for _, a in ipairs(d:GetDescendants()) do
+                if a:IsA("Attachment") and string.find(a.Name, "SnapPoint") then
+                    out[#out + 1] = { shelf = d, att = a }
+                end
+            end
+        end
+    end
+    return out
+end
+
+local function shelfPrice(id, entry)
+    local data  = Items and Items[id]
+    local price = 0
+    if MutatorMod then
+        pcall(function()
+            price = MutatorMod:CalculatePriceForEntry((data and data.BasePrice) or 0,
+                { ItemId = tonumber(id), Mutators = entry.Mutators or {}, Condition = entry.Condition }) or 0
+        end)
+    end
+    return math.floor(price)
+end
+
+-- Read shelf occupancy directly: placed Stock models stream into PlotN.Stock when
+-- you're at/near base. Each placed item sits on its nearest SnapPoint, so we map
+-- items → slots and the leftover slots are EMPTY → we place only there (no
+-- "occupied" spam). When the Stock folder is empty we can't read occupancy (far
+-- away) and fall back to a capped blind round-robin.
+-- Occupancy is NOT readable client-side: prompt.Enabled and streamed Stock both report
+-- wrong values even when standing at the base. The only trustworthy signal is whether a
+-- placement actually goes through (InventoryCount drops). So we DISCOVER occupancy
+-- empirically: try a slot; if it's rejected we remember it as occupied and don't poke it
+-- again until a sale frees a slot (LifetimeNPCSales ticks up), which re-opens discovery.
+local shelfBusy      = false
+local shelfOccupied  = {}     -- slotKey -> true: known occupied (re-learned after each sale)
+local shelfFullLatch = false  -- every slot known-occupied; idle until a sale frees one
+local shelfSalesMark = nil    -- LifetimeNPCSales watermark
+local shelfTooBig    = {}     -- (kept so shelfEligibleItems stays simple; unused now)
+local SHELF_MAX_SPAM = 4      -- cap failed "occupied" probes per pass
+
+local function slotKeyOf(slot)
+    return tostring(slot.shelf:GetAttribute("GUID")) .. "|" .. slot.att.Name
+end
+
+local function shelfEligibleItems(inv)
+    local list = {}
+    for guid, entry in pairs(inv) do
+        local id   = tostring(entry.ItemId)
+        local data = Items and Items[id]
+        local name = data and data.Name
+        local cat  = data and data.Category
+        local fav     = (entry.Favorited == true)
+        local tooRich = State.ShelfFilterPrice and (shelfPrice(id, entry) >= State.ShelfMaxPrice)
+        local isDiamondSafe = (name == "Diamond Safe")
+        if not (cat and SKIP_SHELF_CAT[cat]) and not shelfTooBig[guid] and not fav and not tooRich and not isDiamondSafe then
+            list[#list + 1] = { guid = guid, id = id, data = data, entry = entry }
+        end
+    end
+    return list
+end
+
+local function placeOnSlot(slot, it)
+    local before = player:GetAttribute("InventoryCount") or 0
+    local cf = slot.att.WorldCFrame * CFrame.Angles(0, math.rad((it.data and it.data.ShelfRotationY) or 0), 0)
+    pcall(function()
+        R.PlaceStock:FireServer(it.guid, it.id, cf, shelfPrice(it.id, it.entry),
+            slot.shelf:GetAttribute("GUID"), slot.att.Name, false)
+    end)
+    if State.ShelfPlaceDelay > 0 then task.wait(State.ShelfPlaceDelay) end
+    return (player:GetAttribute("InventoryCount") or 0) < before
+end
+
+-- a slot is "big" (fits vehicles / large furniture) based on its shelf's name
+local function slotIsBig(slot)
+    local n = slot.shelf.Name
+    return (string.find(n, "Large") or string.find(n, "Double") or string.find(n, "Table")) ~= nil
+end
+local BIG_ITEM_WEIGHT = 40   -- items >= this (vehicles, big appliances) need a big slot
+
+local function doShelfPass()
+    if shelfBusy then return 0 end
+    shelfBusy = true
+    local placed = 0
+    pcall(function()
+        local slots = shelfSlots()
+        if #slots == 0 then return end
+        local sales = player:GetAttribute("LifetimeNPCSales") or 0
+        shelfSalesMark = shelfSalesMark or sales
+
+        -- a shelf item SOLD → a slot opened; forget learned occupancy and re-discover
+        if sales > shelfSalesMark then
+            shelfOccupied = {}
+            shelfFullLatch = false
+        end
+        shelfSalesMark = sales
+
+        if shelfFullLatch then
+            State.status = "🛒 Shelf full — waiting for a sale"
+            return
+        end
+
+        local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+        if not ok or type(inv) ~= "table" then return end
+        local items = shelfEligibleItems(inv)
+        if #items == 0 then State.status = "🛒 Nothing to add"; return end
+
+        -- big items (vehicles / large furniture) only go on BIG slots; small items prefer
+        -- small slots so big slots stay open. Lightest items first.
+        local bigSlots, smallSlots = {}, {}
+        for _, s in ipairs(slots) do
+            if slotIsBig(s) then bigSlots[#bigSlots + 1] = s else smallSlots[#smallSlots + 1] = s end
+        end
+        table.sort(items, function(a, b)
+            local wa = (a.data and a.data.Weight) or 0
+            local wb = (b.data and b.data.Weight) or 0
+            if State.PrioritizeHeavy then return wa > wb else return wa < wb end
+        end)
+
+        -- EMPIRICAL placement: try a slot; a drop in InventoryCount = it was free (now
+        -- filled), a rejection = occupied → remember it so we don't poke it again until a
+        -- sale re-opens discovery. Spam is capped per pass.
+        local fails = 0
+        for _, it in ipairs(items) do
+            if not State.AutoShelf or fails >= SHELF_MAX_SPAM then break end
+            local w = (it.data and it.data.Weight) or 0
+            local isBig = (w >= BIG_ITEM_WEIGHT) or (it.data and it.data.Category == "Vehicle")
+            local candidates = {}
+            if isBig then
+                for _, s in ipairs(bigSlots) do candidates[#candidates + 1] = s end
+            else
+                for _, s in ipairs(smallSlots) do candidates[#candidates + 1] = s end
+                for _, s in ipairs(bigSlots)   do candidates[#candidates + 1] = s end
+            end
+            for _, slot in ipairs(candidates) do
+                if fails >= SHELF_MAX_SPAM then break end
+                local k = slotKeyOf(slot)
+                if not shelfOccupied[k] then
+                    if placeOnSlot(slot, it) then
+                        shelfOccupied[k] = true        -- now filled
+                        placed = placed + 1
+                        State.status = "🛒 Shelved " .. placed .. " item(s)"
+                        break
+                    else
+                        shelfOccupied[k] = true        -- occupied / too small → skip till a sale
+                        fails = fails + 1
+                    end
+                end
+            end
+        end
+
+        -- every slot now known-occupied → idle until a sale frees one (stops the spam)
+        local allOcc = true
+        for _, s in ipairs(slots) do
+            if not shelfOccupied[slotKeyOf(s)] then allOcc = false break end
+        end
+        if allOcc then
+            shelfFullLatch = true
+            if placed == 0 then State.status = "🛒 Shelf full — waiting for a sale" end
+        end
+    end)
+    shelfBusy = false
+    return placed
+end
+
+local shelfThread, shelfSalesConn
+local function startAutoShelf()
+    if shelfThread then pcall(task.cancel, shelfThread) end
+    if shelfSalesConn then shelfSalesConn:Disconnect() end
+    -- fresh start: forget all learned occupancy and re-discover from scratch.
+    -- Also clear shelfBusy in case the previous run was cancelled mid-placement
+    -- (toggling OFF kills the thread between shelfBusy=true and =false, which would
+    -- otherwise leave it stuck true and block every future pass).
+    shelfBusy = false
+    shelfOccupied, shelfTooBig = {}, {}
+    shelfFullLatch = false
+    shelfSalesMark = player:GetAttribute("LifetimeNPCSales") or 0
+    -- The instant a shelf item SELLS (LifetimeNPCSales ticks up) a slot opened →
+    -- re-discover and fill it immediately, no waiting for the next scan.
+    shelfSalesConn = player:GetAttributeChangedSignal("LifetimeNPCSales"):Connect(function()
+        if State.AutoShelf and not hasPendingPriorities() then
+            shelfOccupied = {}
+            shelfFullLatch = false
+            task.spawn(doShelfPass)
+        end
+    end)
+    shelfThread = task.spawn(function()
+        while State.AutoShelf do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
+            doShelfPass()
+            task.wait(State.ShelfScanDelay)
+        end
+    end)
+    track(shelfSalesConn); trackThread(shelfThread)
+end
+
+-- ─── SPEED HACK ──────────────────────────────────────────────────────
+local function applySpeed()
+    local hum = character and character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.WalkSpeed = State.SpeedHack and State.WalkSpeed or 16
+    end
+end
+
+-- ─── ANTI-AFK ────────────────────────────────────────────────────────
+local afkThread
+local function startAntiAFK()
+    if afkThread then task.cancel(afkThread) end
+    afkThread = task.spawn(function()
+        while true do
+            if State.AntiAFK then
+                pcall(function()
+                    VR:CaptureController()
+                    VR:ClickButton2(Vector2.new())
+                end)
+            end
+            task.wait(55)
+        end
+    end)
+    trackThread(afkThread)
+end
+
+-- ─── CONTAINER AUTO-FARM LOOP ──────────────────────────────────────────
+local containerFarmThread
+
+local function getClosestContainer()
+    local debris = WS:FindFirstChild("_Debris")
+    local garages = debris and debris:FindFirstChild("Garages")
+    if not garages or not rootPart then return nil end
+    
+    local best = nil
+    local maxEntryCost = -1
+    local minDist = math.huge
+    local myPos = rootPart.Position
+    
+    for _, g in ipairs(garages:GetChildren()) do
+        if State.SelectedContainers[g.Name] then
+            local prompt = g:FindFirstChild("EnterAuction", true)
+            if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
+                local promptPart = prompt.Parent
+                if promptPart and promptPart:IsA("BasePart") then
+                    local d = (promptPart.Position - myPos).Magnitude
+                    local entryCost = g:GetAttribute("EntryCost") or 0
+                    
+                    if entryCost > maxEntryCost then
+                        maxEntryCost = entryCost
+                        minDist = d
+                        best = { model = g, prompt = prompt, part = promptPart }
+                    elseif entryCost == maxEntryCost then
+                        if d < minDist then
+                            minDist = d
+                            best = { model = g, prompt = prompt, part = promptPart }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function getMyVehicle()
+    for _, m in ipairs(WS:GetChildren()) do
+        if m:GetAttribute("VehicleGUID") and m:GetAttribute("OwnerUserId") == player.UserId then
+            return m
+        end
+    end
+    return nil
+end
+
+local function collectAllMyCarryables(garageModel)
+    local carry = WS:FindFirstChild("_Carryables")
+    if not carry or not rootPart or not garageModel then return end
+    
+    local garagePos = garageModel:GetPivot().Position
+    local startCollect = os.clock()
+    
+    -- Loop until no owned carryables are left within 80 studs, or timeout (15s)
+    while os.clock() - startCollect < 15 and State.AutoContainerFarm do
+        local targets = {}
+        for _, item in ipairs(carry:GetChildren()) do
+            if isMine(item) then
+                local base = item:FindFirstChild("Base") or item:FindFirstChildWhichIsA("BasePart")
+                local pos = base and base.Position or item:GetPivot().Position
+                local dist = (pos - garagePos).Magnitude
+                if dist <= 80 then
+                    local prompt = nil
+                    for _, d in ipairs(item:GetDescendants()) do
+                        if d:IsA("ProximityPrompt") and GRAB_PROMPTS[d.Name] and d.Enabled then
+                            prompt = d
+                            break
+                        end
+                    end
+                    if prompt then
+                        local shouldGrab = true
+                        if prompt.Name == "PickupPrompt" and not passesFilters(item) then
+                            shouldGrab = false
+                        end
+                        if shouldGrab then
+                            table.insert(targets, {
+                                item = item,
+                                prompt = prompt,
+                                pos = pos
+                            })
+                        end
+                    end
+                end
+            end
+        end
+        
+        if #targets == 0 then
+            break -- No items left to collect!
+        end
+        
+        -- Teleport to and collect each target
+        for _, target in ipairs(targets) do
+            if not State.AutoContainerFarm then break end
+            
+            State.status = "🤲 Teleporting to item: " .. target.item.Name
+            rootPart.CFrame = CFrame.new(target.pos + Vector3.new(0, 1.5, 0))
+            task.wait(0.15)
+            
+            pcall(function() fireproximityprompt(target.prompt) end)
+            task.wait(0.2)
+        end
+        task.wait(0.3)
+    end
+end
+
+local function runContainerFarmLoop()
+    if containerFarmThread then pcall(task.cancel, containerFarmThread) end
+    containerFarmThread = task.spawn(function()
+        while State.AutoContainerFarm do
+            -- Double check we are not sitting before searching or teleporting
+            local hum = character and character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.SeatPart then
+                State.status = "🚶 Exiting vehicle first..."
+                local exitStart = os.clock()
+                while hum.SeatPart and (os.clock() - exitStart) < 4 do
+                    hum.Sit = false
+                    hum.Jump = true
+                    local seat = hum.SeatPart
+                    if seat then
+                        local weld = seat:FindFirstChild("SeatWeld")
+                        if weld then pcall(function() weld:Destroy() end) end
+                    end
+                    task.wait(0.2)
+                end
+                task.wait(1.5)
+            end
+
+            State.status = "🔍 Searching for selected containers..."
+            local target = getClosestContainer()
+            if target then
+                local oldBid = State.AutoBidWin
+                local oldPickup = State.AutoPickup
+                State.AutoBidWin = true
+                State.AutoPickup = true
+                
+                -- Teleport to the prompt part
+                State.status = "✈️ Teleporting to " .. target.model.Name
+                if rootPart then
+                    rootPart.CFrame = target.part.CFrame + Vector3.new(0, 2, 0)
+                end
+                task.wait(0.5)
+                
+                -- Fire prompt
+                State.status = "🏁 Starting auction on " .. target.model.Name
+                pcall(function() fireproximityprompt(target.prompt) end)
+                task.wait(1.5)
+                
+                -- Wait for auction to begin
+                local startWait = os.clock()
+                while not State.inAuction and (os.clock() - startWait) < 5 and State.AutoContainerFarm do
+                    task.wait(0.2)
+                end
+                
+                if State.inAuction and State.AutoContainerFarm then
+                    State.status = "🔨 Bidding on " .. target.model.Name
+                    -- Wait for auction to end
+                    while State.inAuction and State.AutoContainerFarm do
+                        task.wait(0.5)
+                    end
+                    
+                    if State.AutoContainerFarm then
+                        State.status = "✅ Auction won/ended. Collecting items..."
+                        task.wait(1.5)
+                        collectAllMyCarryables(target.model)
+                    end
+                else
+                    State.status = "⚠️ Auction failed to start"
+                end
+                
+                if State.AutoContainerFarm then
+                    -- Vehicle Unload Phase
+                    local veh = getMyVehicle()
+                    if veh then
+                        local promptLocation = veh:FindFirstChild("PromptLocation", true)
+                        local prompt = promptLocation and promptLocation:FindFirstChild("VehiclePrompt")
+                        local driveSeat = veh:FindFirstChild("DriveSeat", true)
+                        
+                        if prompt and driveSeat then
+                            State.status = "✈️ Teleporting to vehicle..."
+                            if rootPart then
+                                rootPart.CFrame = driveSeat.CFrame + Vector3.new(0, 2, 0)
+                            end
+                            task.wait(0.3)
+                            
+                            State.status = "🚛 Entering vehicle..."
+                            pcall(function() fireproximityprompt(prompt) end)
+                            task.wait(0.8)
+                            
+                            -- Verify we are sitting in the vehicle seat
+                            local hum = character and character:FindFirstChildOfClass("Humanoid")
+                            if hum and hum.SeatPart and hum.SeatPart:IsDescendantOf(veh) then
+                                State.status = "📦 Unloading vehicle..."
+                                doUnloadPass()
+                                task.wait(1)
+                            else
+                                State.status = "⚠️ Failed to enter vehicle"
+                            end
+                            
+                            -- Jump out and verify seat is cleared
+                            if hum then
+                                local exitStart = os.clock()
+                                while hum.SeatPart and (os.clock() - exitStart) < 4 do
+                                    hum.Sit = false
+                                    hum.Jump = true
+                                    local seat = hum.SeatPart
+                                    if seat then
+                                        local weld = seat:FindFirstChild("SeatWeld")
+                                        if weld then pcall(function() weld:Destroy() end) end
+                                    end
+                                    task.wait(0.2)
+                                end
+                            end
+                            State.status = "🚶 Exited vehicle"
+                            task.wait(2)
+                        else
+                            State.status = "⚠️ Vehicle seat or prompt not found"
+                        end
+                    else
+                        State.status = "⚠️ No vehicle spawned"
+                    end
+                end
+                
+                -- Restore previous states
+                State.AutoBidWin = oldBid
+                State.AutoPickup = oldPickup
+            else
+                State.status = "📭 No available containers found. Waiting..."
+            end
+            task.wait(3)
+        end
+    end)
+    trackThread(containerFarmThread)
+end
+
+-- ─── AUTO COLLECT LOST ITEMS ──────────────────────────────────────────
+local collectLostThread
+local function startAutoCollectLost()
+    if collectLostThread then pcall(task.cancel, collectLostThread) end
+    collectLostThread = task.spawn(function()
+        while State.AutoCollectLost do
+            -- Only scan if we are not busy in an auction or container farming
+            if not State.inAuction and not State.AutoContainerFarm then
+                local lostFolder = WS:FindFirstChild("_LostItems")
+                if lostFolder and rootPart then
+                    local targets = {}
+                    for _, item in ipairs(lostFolder:GetChildren()) do
+                        local prompt = nil
+                        for _, d in ipairs(item:GetDescendants()) do
+                            if d:IsA("ProximityPrompt") and d.Name == "PickupPrompt" and d.Enabled then
+                                prompt = d
+                                break
+                            end
+                        end
+                        local base = item:FindFirstChild("Base") or item:FindFirstChildWhichIsA("BasePart")
+                        local pos = base and base.Position or item:GetPivot().Position
+                        if prompt then
+                            table.insert(targets, {
+                                item = item,
+                                prompt = prompt,
+                                pos = pos
+                            })
+                        end
+                    end
+                    
+                    if #targets > 0 then
+                        for _, target in ipairs(targets) do
+                            if not State.AutoCollectLost or State.AutoContainerFarm or State.inAuction then break end
+                            State.status = "🔍 Collecting Lost: " .. target.item.Name
+                            rootPart.CFrame = CFrame.new(target.pos + Vector3.new(0, 1.5, 0))
+                            task.wait(0.25)
+                            pcall(function() fireproximityprompt(target.prompt) end)
+                            task.wait(0.45)
+                        end
+                    else
+                        State.status = "📭 No active Lost items found"
+                    end
+                end
+            else
+                State.status = "⏳ Lost sweep paused (busy farming)"
+            end
+            task.wait(4)
+        end
+    end)
+    trackThread(collectLostThread)
+end
+
+local function isSafeItem(entry)
+    if not entry then return false end
+    local id = tostring(entry.ItemId or "")
+    local data = Items and Items[id]
+    if data and data.SafeId ~= nil then
+        return true
+    end
+    return false
+end
+
+local autoCleanThread = nil
+local function getWashableItemPrice(item)
+    local entry = item.data
+    if not entry then return 0 end
+    local id = tostring(entry.ItemId or "")
+    local itemData = Items and Items[id]
+    local basePrice = itemData and itemData.BasePrice or 0
+    local price = basePrice
+    
+    if MutatorMod then
+        pcall(function()
+            price = MutatorMod:CalculatePriceForEntry(basePrice, entry) or basePrice
+        end)
+    end
+    if Grading and entry.Grade and Grading.GradeMultipliers and Grading.GradeMultipliers[entry.Grade] then
+        price = price * Grading.GradeMultipliers[entry.Grade]
+    end
+    return price
+end
+
+local function findHighestValueWashableItem()
+    local ok, res = pcall(function() return R.GetWashableItems:InvokeServer() end)
+    if not ok or not res or type(res.items) ~= "table" then return nil end
+    
+    local highestItem = nil
+    local highestPrice = -1
+    for _, item in ipairs(res.items) do
+        if item.data and item.data.Favorited ~= true and not isSafeItem(item.data) then
+            local price = getWashableItemPrice(item)
+            if price > highestPrice then
+                highestPrice = price
+                highestItem = item
+            end
+        end
+    end
+    return highestItem, highestPrice
+end
+
+local function startAutoClean()
+    if autoCleanThread then pcall(task.cancel, autoCleanThread) end
+    autoCleanThread = task.spawn(function()
+        while State.AutoCleanHighest do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
+            local ok, slotState = pcall(function() return R.GetSlotState:InvokeServer() end)
+            if ok and slotState and type(slotState.slots) == "table" then
+                local unlocked = slotState.unlockedCount or 1
+                local slots = slotState.slots
+                
+                for i = 1, unlocked do
+                    local slotIndex = i
+                    local slotData = slots[tostring(slotIndex)]
+                    
+                    if slotData == nil then
+                        local item, price = findHighestValueWashableItem()
+                        if item then
+                            local name = item.data and Items[tostring(item.data.ItemId)] and Items[tostring(item.data.ItemId)].Name or "Item"
+                            State.status = "🧼 Washing: " .. name .. " ($" .. fmt(price) .. ")"
+                            pcall(function()
+                                R.StartWash:InvokeServer(slotIndex, item.guid, item.source, item.vehicleGUID)
+                            end)
+                        end
+                    elseif slotData.Washed then
+                        State.status = "🧼 Claiming washed item..."
+                        pcall(function()
+                            R.ClaimWashedItem:InvokeServer(slotIndex)
+                        end)
+                    elseif workspace:GetServerTimeNow() >= (slotData.StartTime or 0) + (slotData.Duration or 0) then
+                        State.status = "🧼 Collecting washed item..."
+                        pcall(function()
+                            R.CollectWash:InvokeServer(slotIndex)
+                        end)
+                    end
+                end
+            end
+            task.wait(3)
+        end
+    end)
+    trackThread(autoCleanThread)
+end
+
+local autoGradeThread = nil
+local function getGradableItemPrice(item)
+    local entry = item.data
+    if not entry then return 0 end
+    local id = tostring(entry.ItemId or "")
+    local itemData = Items and Items[id]
+    local basePrice = itemData and itemData.BasePrice or 0
+    local price = basePrice
+    
+    if MutatorMod then
+        pcall(function()
+            price = MutatorMod:CalculatePriceForEntry(basePrice, entry) or basePrice
+        end)
+    end
+    if Grading and entry.Grade and Grading.GradeMultipliers and Grading.GradeMultipliers[entry.Grade] then
+        price = price * Grading.GradeMultipliers[entry.Grade]
+    end
+    return price
+end
+
+local function findHighestValueGradableItem()
+    local ok, res = pcall(function() return R.GetGradableItems:InvokeServer() end)
+    if not ok or not res or type(res.items) ~= "table" then return nil end
+    
+    local highestItem = nil
+    local highestPrice = -1
+    for _, item in ipairs(res.items) do
+        if item.data and item.data.Favorited ~= true and not isSafeItem(item.data) then
+            local price = getGradableItemPrice(item)
+            if price > highestPrice then
+                highestPrice = price
+                highestItem = item
+            end
+        end
+    end
+    return highestItem, highestPrice
+end
+
+local function startAutoGrade()
+    if autoGradeThread then pcall(task.cancel, autoGradeThread) end
+    autoGradeThread = task.spawn(function()
+        while State.AutoGradeHighest do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
+            local ok, slotState = pcall(function() return R.GetGradeSlotState:InvokeServer() end)
+            if ok and slotState and type(slotState.slots) == "table" then
+                local unlocked = slotState.unlockedCount or 1
+                local slots = slotState.slots
+                
+                for i = 1, unlocked do
+                    local slotIndex = i
+                    local slotData = slots[tostring(slotIndex)]
+                    
+                    if slotData == nil then
+                        local item, price = findHighestValueGradableItem()
+                        if item then
+                            local name = item.data and Items[tostring(item.data.ItemId)] and Items[tostring(item.data.ItemId)].Name or "Item"
+                            State.status = "🎓 Grading: " .. name .. " ($" .. fmt(price) .. ")"
+                            pcall(function()
+                                R.StartGrading:InvokeServer(slotIndex, item.guid, item.source, item.vehicleGUID)
+                            end)
+                        end
+                    elseif slotData.Grade then
+                        State.status = "🎓 Claiming graded item..."
+                        pcall(function()
+                            R.ClaimGradedItem:InvokeServer(slotIndex)
+                        end)
+                    elseif workspace:GetServerTimeNow() >= (slotData.StartTime or 0) + (slotData.Duration or 0) then
+                        State.status = "🎓 Collecting graded item..."
+                        pcall(function()
+                            R.CollectGrade:InvokeServer(slotIndex)
+                        end)
+                    end
+                end
+            end
+            task.wait(3)
+        end
+    end)
+    trackThread(autoGradeThread)
+end
+
+local autoLocksmithThread = nil
+local function getLockableItemPrice(item)
+    local entry = item.data
+    if not entry then return 0 end
+    local id = tostring(entry.ItemId or "")
+    local itemData = Items and Items[id]
+    local basePrice = itemData and itemData.BasePrice or 0
+    local price = basePrice
+    
+    if MutatorMod then
+        pcall(function()
+            price = MutatorMod:CalculatePriceForEntry(basePrice, entry) or basePrice
+        end)
+    end
+    if Grading and entry.Grade and Grading.GradeMultipliers and Grading.GradeMultipliers[entry.Grade] then
+        price = price * Grading.GradeMultipliers[entry.Grade]
+    end
+    return price
+end
+
+local function findHighestValueLockableItem()
+    local ok, res = pcall(function() return R.GetLockableItems:InvokeServer() end)
+    if not ok or not res or type(res.items) ~= "table" then return nil end
+    
+    -- First pass: look for Diamond Safe items (prioritised)
+    local diamondItem = nil
+    local diamondPrice = -1
+    -- Second pass fallback: highest value non-diamond item
+    local highestItem = nil
+    local highestPrice = -1
+    
+    for _, item in ipairs(res.items) do
+        if item.data and item.data.Favorited ~= true then
+            local price = getLockableItemPrice(item)
+            local id = tostring(item.data.ItemId or "")
+            local itemName = Items and Items[id] and Items[id].Name or ""
+            
+            if string.find(itemName:lower(), "diamond") and string.find(itemName:lower(), "safe") then
+                if price > diamondPrice then
+                    diamondPrice = price
+                    diamondItem = item
+                end
+            else
+                if price > highestPrice then
+                    highestPrice = price
+                    highestItem = item
+                end
+            end
+        end
+    end
+    
+    -- Prioritise Diamond Safe items over everything else
+    if diamondItem then
+        return diamondItem, diamondPrice
+    end
+    return highestItem, highestPrice
+end
+
+local function startAutoLocksmith()
+    if autoLocksmithThread then pcall(task.cancel, autoLocksmithThread) end
+    autoLocksmithThread = task.spawn(function()
+        while State.AutoLocksmith do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
+            local ok, slotState = pcall(function() return R.GetLocksmithSlotState:InvokeServer() end)
+            if ok and slotState and type(slotState.slots) == "table" then
+                local unlocked = slotState.unlockedCount or 1
+                local slots = slotState.slots
+                
+                for i = 1, unlocked do
+                    local slotIndex = i
+                    local slotData = slots[tostring(slotIndex)]
+                    
+                    if slotData == nil then
+                        local item, price = findHighestValueLockableItem()
+                        if item then
+                            local name = item.data and Items[tostring(item.data.ItemId)] and Items[tostring(item.data.ItemId)].Name or "Safe"
+                            State.status = "🔑 Cracking: " .. name .. " ($" .. fmt(price) .. ")"
+                            pcall(function()
+                                R.StartLocksmith:InvokeServer(slotIndex, item.guid, item.source, item.vehicleGUID)
+                            end)
+                        end
+                    elseif slotData.RewardItemId or (slotData.RewardDiamonds and slotData.RewardDiamonds > 0) then
+                        State.status = "🔑 Claiming locksmith item..."
+                        pcall(function()
+                            R.ClaimLocksmithItem:InvokeServer(slotIndex)
+                        end)
+                    elseif workspace:GetServerTimeNow() >= (slotData.StartTime or 0) + (slotData.Duration or 0) then
+                        State.status = "🔑 Opening safe..."
+                        pcall(function()
+                            R.OpenSafe:InvokeServer(slotIndex)
+                        end)
+                    end
+                end
+            end
+            task.wait(3)
+        end
+    end)
+    trackThread(autoLocksmithThread)
+end
+
+local function getAllSafes()
+    local list = {}
+    local seen = {}
+    if Items then
+        for id, data in pairs(Items) do
+            if type(data) == "table" and data.SafeId and data.Name then
+                if not seen[data.Name] then
+                    seen[data.Name] = true
+                    table.insert(list, data.Name)
+                end
+            end
+        end
+    end
+    local defaults = { "Junk Safe", "Wooden Safe", "Metal Safe", "Code Safe", "Diamond Safe", "Diamond Vault" }
+    for _, name in ipairs(defaults) do
+        if not seen[name] then
+            seen[name] = true
+            table.insert(list, name)
+        end
+    end
+    table.sort(list)
+    return list
+end
+
+local DiscoveredSafes = getAllSafes()
+
+local function ensureBestLockpickEquipped()
+    local ok, res = pcall(function() return R.BuyLockpick:InvokeServer("Picklock1") end)
+    if ok and res and type(res) == "table" and res.owned then
+        local best = nil
+        for i = 4, 1, -1 do
+            local name = "Picklock" .. i
+            if res.owned[name] then
+                best = name
+                break
+            end
+        end
+        best = best or "Picklock1"
+        if res.equipped ~= best then
+            pcall(function() R.BuyLockpick:InvokeServer(best) end)
+        end
+        return best
+    end
+    return "Picklock1"
+end
+
+local function getLockpickableInventorySafes()
+    local list = {}
+    local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+    if ok and type(inv) == "table" then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true then
+                local id = tostring(entry.ItemId or "")
+                local itemData = Items and Items[id]
+                if itemData and itemData.SafeId then
+                    table.insert(list, {
+                        guid = guid,
+                        name = itemData.Name,
+                        safeId = itemData.SafeId,
+                        entry = entry
+                    })
+                end
+            end
+        end
+    end
+    return list
+end
+
+local autoLockpickSafeThread = nil
+local function startAutoLockpickSafe()
+    if autoLockpickSafeThread then pcall(task.cancel, autoLockpickSafeThread) end
+    autoLockpickSafeThread = task.spawn(function()
+        while State.AutoLockpickSafe do
+            pcall(function()
+                ensureBestLockpickEquipped()
+                local safes = getLockpickableInventorySafes()
+                for _, safe in ipairs(safes) do
+                    if not State.AutoLockpickSafe then break end
+                    if State.SelectedSafes[safe.name] then
+                        State.status = "🔓 Lockpicking: " .. safe.name .. "..."
+                        local ok, res = pcall(function()
+                            return R.PicklockInventorySafe:InvokeServer(safe.guid)
+                        end)
+                        if ok and res and type(res) == "table" and res.success then
+                            local rewardStr = ""
+                            if res.rewardItemId then
+                                local rName = Items[tostring(res.rewardItemId)] and Items[tostring(res.rewardItemId)].Name or "Item"
+                                rewardStr = rName
+                            elseif res.rewardDiamonds then
+                                rewardStr = res.rewardDiamonds .. " Diamonds"
+                            end
+                            State.status = "🎉 Unlocked " .. safe.name .. " -> " .. rewardStr
+                        else
+                            State.status = "❌ Failed lockpick: " .. (res and res.error or "unknown error")
+                        end
+                        task.wait(1.5)
+                    end
+                end
+            end)
+            task.wait(3)
+        end
+    end)
+    trackThread(autoLockpickSafeThread)
+end
+
+local autoFavoriteSafeThread = nil
+local function startAutoFavoriteSafe()
+    if autoFavoriteSafeThread then pcall(task.cancel, autoFavoriteSafeThread) end
+    autoFavoriteSafeThread = task.spawn(function()
+        while State.AutoFavoriteSafe do
+            pcall(function()
+                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+                if ok and type(inv) == "table" then
+                    for guid, entry in pairs(inv) do
+                        if not State.AutoFavoriteSafe then break end
+                        if entry.Favorited ~= true then
+                            local id = tostring(entry.ItemId or "")
+                            local itemData = Items and Items[id]
+                            if itemData and itemData.SafeId then
+                                if State.SelectedFavoriteSafes[itemData.Name] then
+                                    State.status = "🔒 Favoriting safe: " .. itemData.Name .. "..."
+                                    pcall(function()
+                                        R.ToggleFavoriteItem:InvokeServer(guid)
+                                    end)
+                                    task.wait(0.25)
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(3)
+        end
+    end)
+    trackThread(autoFavoriteSafeThread)
+end
+
+local function getInventoryItemPrice(id, entry)
+    if not entry then return 0 end
+    local data = Items and Items[id]
+    local basePrice = data and data.BasePrice or 0
+    local price = basePrice
+    if MutatorMod then
+        pcall(function()
+            price = MutatorMod:CalculatePriceForEntry(basePrice, { ItemId = tonumber(id), Mutators = entry.Mutators or {}, Condition = entry.Condition }) or basePrice
+        end)
+    end
+    if Grading and entry.Grade and Grading.GradeMultipliers and Grading.GradeMultipliers[entry.Grade] then
+        price = price * Grading.GradeMultipliers[entry.Grade]
+    end
+    return math.floor(price)
+end
+
+local autoFavoriteThread = nil
+local function startAutoFavorite()
+    if autoFavoriteThread then pcall(task.cancel, autoFavoriteThread) end
+    autoFavoriteThread = task.spawn(function()
+        while State.AutoFavorite do
+            pcall(function()
+                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+                if ok and type(inv) == "table" then
+                    for guid, entry in pairs(inv) do
+                        if not State.AutoFavorite then break end
+                        if entry.Favorited ~= true then
+                            local id = tostring(entry.ItemId or "")
+                            local price = getInventoryItemPrice(id, entry)
+                            if price >= (State.AutoFavoritePrice or 50000) then
+                                pcall(function()
+                                    R.ToggleFavoriteItem:InvokeServer(guid)
+                                end)
+                                task.wait(0.25)
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(3)
+        end
+    end)
+    trackThread(autoFavoriteThread)
+end
+
+local function isGavelTrophy(entry)
+    if not entry then return false end
+    local id = tostring(entry.ItemId or "")
+    if id == "376" then return true end
+    local name = Items and Items[id] and Items[id].Name or ""
+    if name:lower():find("gavel") and name:lower():find("trophy") then
+        return true
+    end
+    return false
+end
+
+local function matchesGavelTrophyFilters(entry)
+    if not isGavelTrophy(entry) then return false end
+    if not entry.Mutators or type(entry.Mutators) ~= "table" then return false end
+    
+    local minPercent = State.AutoGavelMinPercent or 100
+    local targetLuck = minPercent / 100
+    
+    local filterAny = State.SelectedGavelMutations["All"] == true
+    local anyChecked = false
+    for m, on in pairs(State.SelectedGavelMutations) do
+        if m ~= "All" and on then
+            anyChecked = true
+            break
+        end
+    end
+    if not anyChecked then
+        filterAny = true
+    end
+    
+    for _, m in ipairs(entry.Mutators) do
+        if type(m) == "table" and m.name then
+            local mName = m.name
+            local mLuck = tonumber(m.luck) or 0
+            
+            if filterAny or State.SelectedGavelMutations[mName] == true then
+                if mLuck >= targetLuck then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local autoGavelFavoriteThread = nil
+local function startAutoGavelFavorite()
+    if autoGavelFavoriteThread then pcall(task.cancel, autoGavelFavoriteThread) end
+    autoGavelFavoriteThread = task.spawn(function()
+        while State.AutoGavelFavorite do
+            pcall(function()
+                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+                if ok and type(inv) == "table" then
+                    for guid, entry in pairs(inv) do
+                        if not State.AutoGavelFavorite then break end
+                        if entry.Favorited ~= true then
+                            if matchesGavelTrophyFilters(entry) then
+                                pcall(function()
+                                    R.ToggleFavoriteItem:InvokeServer(guid)
+                                end)
+                                task.wait(0.25)
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(2.5)
+        end
+    end)
+    trackThread(autoGavelFavoriteThread)
+end
+
+local function isAccessory(entry)
+    if not entry then return false end
+    if entry.RolledAttributes and type(entry.RolledAttributes.Buffs) == "table" then
+        return true
+    end
+    return false
+end
+
+local function matchesAccessoryFilters(entry)
+    if not isAccessory(entry) then return false end
+    
+    local minPercent = State.AutoAccessoryMinPercent or 100
+    local filterAny = State.SelectedAccessoryModifiers["All"] == true
+    local anyChecked = false
+    for m, on in pairs(State.SelectedAccessoryModifiers) do
+        if m ~= "All" and on then
+            anyChecked = true
+            break
+        end
+    end
+    if not anyChecked then
+        filterAny = true
+    end
+    
+    for _, buff in ipairs(entry.RolledAttributes.Buffs) do
+        if type(buff) == "table" and buff.AttrId then
+            local buffId = buff.AttrId
+            local magnitude = tonumber(buff.Magnitude) or 0
+            
+            local displayName = AccessoryIdToDisplay[buffId] or buffId
+            local matchesFilter = false
+            
+            if filterAny then
+                matchesFilter = true
+            else
+                if State.SelectedAccessoryModifiers[displayName] == true or State.SelectedAccessoryModifiers[buffId] == true then
+                    matchesFilter = true
+                end
+            end
+            
+            if matchesFilter and magnitude >= minPercent then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local autoAccessoryFavoriteThread = nil
+local function startAutoAccessoryFavorite()
+    if autoAccessoryFavoriteThread then pcall(task.cancel, autoAccessoryFavoriteThread) end
+    autoAccessoryFavoriteThread = task.spawn(function()
+        while State.AutoAccessoryFavorite do
+            pcall(function()
+                local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+                if ok and type(inv) == "table" then
+                    for guid, entry in pairs(inv) do
+                        if not State.AutoAccessoryFavorite then break end
+                        if entry.Favorited ~= true then
+                            if matchesAccessoryFilters(entry) then
+                                pcall(function()
+                                    R.ToggleFavoriteItem:InvokeServer(guid)
+                                end)
+                                task.wait(0.25)
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(2.5)
+        end
+    end)
+    trackThread(autoAccessoryFavoriteThread)
+end
+
+function hasPendingPriorities()
+    local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
+    if not ok or type(inv) ~= "table" then return false end
+    
+    -- Check Auto Favorite Safe
+    if State.AutoFavoriteSafe then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true then
+                local id = tostring(entry.ItemId or "")
+                local itemData = Items and Items[id]
+                if itemData and itemData.SafeId and State.SelectedFavoriteSafes[itemData.Name] then
+                    return true
+                end
+            end
+        end
+    end
+    
+    -- Check Auto Favorite Gavel Trophy
+    if State.AutoGavelFavorite then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true and isGavelTrophy(entry) and matchesGavelTrophyFilters(entry) then
+                return true
+            end
+        end
+    end
+    
+    -- Check Auto Favorite Accessories
+    if State.AutoAccessoryFavorite then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true and isAccessory(entry) and matchesAccessoryFilters(entry) then
+                return true
+            end
+        end
+    end
+    
+    -- Check Auto Favorite Items
+    if State.AutoFavorite then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true then
+                local id = tostring(entry.ItemId or "")
+                local price = getInventoryItemPrice(id, entry)
+                if price >= (State.AutoFavoritePrice or 50000) then
+                    return true
+                end
+            end
+        end
+    end
+    
+    -- Check Auto Lockpick Safe
+    if State.AutoLockpickSafe then
+        for guid, entry in pairs(inv) do
+            if entry.Favorited ~= true then
+                local id = tostring(entry.ItemId or "")
+                local itemData = Items and Items[id]
+                if itemData and itemData.SafeId and State.SelectedSafes[itemData.Name] then
+                    return true
+                end
+            end
+        end
+    end
+    
+    return false
+end
+
+local sellInventoryThread
+local function startSellInventory()
+    if sellInventoryThread then pcall(task.cancel, sellInventoryThread) end
+    sellInventoryThread = task.spawn(function()
+        while State.SellInventory do
+            if hasPendingPriorities() then
+                State.status = "⏳ Waiting for inventory priorities..."
+                task.wait(1)
+                continue
+            end
+            local ok, items = pcall(function() return R.GetSellableItems:InvokeServer() end)
+            if ok and type(items) == "table" then
+                local guids = {}
+                for guid, entry in pairs(items) do
+                    if entry.Favorited ~= true then
+                        table.insert(guids, guid)
+                    end
+                end
+                
+                if #guids > 0 then
+                    State.status = "💰 Selling Quick Sell items..."
+                    local ok2, result = pcall(function() return R.SellItems:InvokeServer(guids) end)
+                    if ok2 and type(result) == "table" then
+                        if result.success then
+                            local soldCount = result.sold or 0
+                            local earned = result.totalEarned or 0
+                            State.itemsSold = State.itemsSold + soldCount
+                            State.earnings = State.earnings + earned
+                            State.status = "💰 Sold " .. soldCount .. " items | Total: $" .. fmt(earned)
+                        else
+                            State.status = "⚠️ " .. (result.error or "Sale rejected")
+                        end
+                    else
+                        State.status = "⚠️ Sale failed"
+                    end
+                else
+                    State.status = "📭 No items to quick sell"
+                end
+            else
+                State.status = "⚠️ Failed to fetch sellable items"
+            end
+            task.wait(4)
+        end
+    end)
+    trackThread(sellInventoryThread)
+end
+
+local autoPromptThread = nil
+local function startAutoPromptHandler()
+    if autoPromptThread then pcall(task.cancel, autoPromptThread) end
+    autoPromptThread = task.spawn(function()
+        while State.AutoContainerFarm do
+            pcall(function()
+                local playerGui = player:FindFirstChild("PlayerGui")
+                if not playerGui then return end
+                
+                for _, sg in ipairs(playerGui:GetChildren()) do
+                    if sg:IsA("ScreenGui") and sg.Enabled and sg.Name ~= "SH_AF3" and sg.Name ~= "SH_AutoFarm_v2" and sg.Name ~= "SH_AutoFarm" then
+                        -- Recursively search descendants for clickable buttons
+                        for _, desc in ipairs(sg:GetDescendants()) do
+                            if desc:IsA("TextButton") and desc.Visible and desc.AbsoluteSize.X > 0 and desc.AbsoluteSize.Y > 0 then
+                                -- Check if the button is actually visible (all parents up to the ScreenGui must be visible)
+                                local isVisible = true
+                                local p = desc.Parent
+                                while p and p ~= sg do
+                                    if p:IsA("GuiObject") and not p.Visible then
+                                        isVisible = false
+                                        break
+                                    end
+                                    p = p.Parent
+                                end
+                                
+                                if isVisible then
+                                    local name = desc.Name
+                                    local text = desc.Text:lower()
+                                    
+                                    local shouldClick = false
+                                    if sg.Name == "ConfirmPromptHost" and name == "ConfirmButton" then
+                                        shouldClick = true
+                                    elseif name == "RepairRevealBackdrop" or name == "RepairContinueButton" then
+                                        shouldClick = true
+                                    elseif name == "ContinueButton" and sg.Name == "TrophyInfoBannerGui" then
+                                        shouldClick = true
+                                    else
+                                        -- General textual matches for starting auctions, continue steps, etc.
+                                        if text:find("yes, start auction") or text:find("start auction") then
+                                            shouldClick = true
+                                        elseif text == "continue" or text == "yes" or text == "confirm" or text == "ok" or text == "okay" then
+                                            shouldClick = true
+                                        end
+                                    end
+                                    
+                                    if shouldClick then
+                                        pcall(function() desc:Activate() end)
+                                        if getconnections then
+                                            pcall(function()
+                                                for _, conn in ipairs(getconnections(desc.MouseButton1Click)) do
+                                                    conn:Fire()
+                                                end
+                                            end)
+                                            pcall(function()
+                                                for _, conn in ipairs(getconnections(desc.Activated)) do
+                                                    conn:Fire()
+                                                end
+                                            end)
+                                        end
+                                        task.wait(0.2)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(0.5)
+        end
+    end)
+    trackThread(autoPromptThread)
+end
+
+-- ─── GUI ─────────────────────────────────────────────────────────────
+if player.PlayerGui:FindFirstChild("SH_AF3") then player.PlayerGui.SH_AF3:Destroy() end
+if player.PlayerGui:FindFirstChild("SH_AutoFarm_v2") then player.PlayerGui.SH_AutoFarm_v2:Destroy() end
+if player.PlayerGui:FindFirstChild("SH_AutoFarm") then player.PlayerGui.SH_AutoFarm:Destroy() end
+
+local SG = Instance.new("ScreenGui")
+SG.Name = "SH_AF3"
+SG.ResetOnSpawn = false
+SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+SG.Parent = player.PlayerGui
+
+local MF = Instance.new("Frame")
+MF.Size = UDim2.new(0,360,0,520)
+MF.Position = UDim2.new(0,18,0.5,-260)
+MF.BackgroundColor3 = Color3.fromRGB(8,8,8)
+MF.BorderSizePixel = 0
+MF.Parent = SG
+Instance.new("UICorner",MF).CornerRadius = UDim.new(0,14)
+local stroke = Instance.new("UIStroke",MF)
+stroke.Color = Color3.fromRGB(220,20,20)
+stroke.Thickness = 1.0
+stroke.Transparency = 0.3
+
+-- Header
+local HD = Instance.new("Frame",MF)
+HD.Name = "Header"
+HD.Size = UDim2.new(1,0,0,56)
+HD.BackgroundColor3 = Color3.fromRGB(12,12,12)
+HD.BorderSizePixel = 0
+HD.ZIndex = 3
+Instance.new("UICorner",HD).CornerRadius = UDim.new(0,14)
+local HDfix = Instance.new("Frame",HD)
+HDfix.Size = UDim2.new(1,0,0.5,0)
+HDfix.Position = UDim2.new(0,0,0.5,0)
+HDfix.BackgroundColor3 = Color3.fromRGB(12,12,12)
+HDfix.BorderSizePixel = 0
+HDfix.ZIndex = 3
+local HDBorder = Instance.new("Frame", HD)
+HDBorder.Size = UDim2.new(1,0,0,2)
+HDBorder.Position = UDim2.new(0,0,1,-2)
+HDBorder.BackgroundColor3 = Color3.fromRGB(220,20,20)
+HDBorder.BorderSizePixel = 0
+HDBorder.ZIndex = 4
+
+local function mkLabel(parent, txt, size, pos, tsz, font, color, zidx, xal)
+    local l = Instance.new("TextLabel", parent)
+    l.Size = size; l.Position = pos
+    l.BackgroundTransparency = 1
+    l.Text = txt; l.TextSize = tsz or 13
+    l.Font = font or Enum.Font.Gotham
+    l.TextColor3 = color or Color3.new(1,1,1)
+    l.ZIndex = zidx or 1
+    l.TextXAlignment = xal or Enum.TextXAlignment.Left
+    return l
+end
+
+mkLabel(HD,"STORAGE HUNTERS",UDim2.new(1,-68,0,28),UDim2.new(0,12,0,6),15,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),4)
+mkLabel(HD,"Hudas Hub",UDim2.new(1,-68,0,16),UDim2.new(0,12,0,34),9,Enum.Font.GothamBold,Color3.fromRGB(160,160,160),4)
+
+local function hdBtn(txt, xOff, bg)
+    local b = Instance.new("TextButton",HD)
+    b.Size = UDim2.new(0,26,0,26)
+    b.Position = UDim2.new(1,xOff,0.5,-13)
+    b.BackgroundColor3 = bg
+    b.Text = txt; b.TextColor3 = Color3.fromRGB(180,180,180)
+    b.TextSize = 13; b.Font = Enum.Font.GothamBold
+    b.BorderSizePixel = 0; b.ZIndex = 5
+    Instance.new("UICorner",b).CornerRadius = UDim.new(1,0)
+    return b
+end
+local CloseBtn = hdBtn("✕",-38,Color3.fromRGB(20,20,20))
+CloseBtn.TextColor3 = Color3.fromRGB(220,20,20)
+local MinBtn   = hdBtn("–",-72,Color3.fromRGB(20,20,20))
+MinBtn.TextColor3 = Color3.fromRGB(180,180,180)
+
+-- Content
+local SC = Instance.new("ScrollingFrame",MF)
+SC.Size = UDim2.new(1,-14,1,-62)
+SC.Position = UDim2.new(0,7,0,60)
+SC.BackgroundTransparency = 1
+SC.BorderSizePixel = 0
+SC.ScrollBarThickness = 3
+SC.ScrollBarImageColor3 = Color3.fromRGB(220,20,20)
+SC.CanvasSize = UDim2.new(0,0,0,0)
+SC.AutomaticCanvasSize = Enum.AutomaticSize.Y
+local lay = Instance.new("UIListLayout",SC)
+lay.SortOrder = Enum.SortOrder.LayoutOrder
+lay.Padding = UDim.new(0,6)
+
+-- Status bar
+local SB = Instance.new("Frame",SC)
+SB.Size = UDim2.new(1,0,0,34)
+SB.BackgroundColor3 = Color3.fromRGB(12,12,12)
+SB.BorderSizePixel = 0; SB.LayoutOrder = 0
+Instance.new("UICorner",SB).CornerRadius = UDim.new(0,10)
+local SDot = Instance.new("Frame",SB)
+SDot.Size = UDim2.new(0,8,0,8)
+SDot.Position = UDim2.new(0,10,0.5,-4)
+SDot.BackgroundColor3 = Color3.fromRGB(40,40,40)
+SDot.BorderSizePixel = 0
+Instance.new("UICorner",SDot).CornerRadius = UDim.new(1,0)
+local SLbl = mkLabel(SB,"Status: Idle",UDim2.new(1,-28,1,0),UDim2.new(0,26,0,0),11,Enum.Font.Gotham,Color3.fromRGB(180,180,180),1)
+SLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+-- Stats
+local SF = Instance.new("Frame",SC)
+SF.Size = UDim2.new(1,0,0,60)
+SF.BackgroundColor3 = Color3.fromRGB(12,12,12)
+SF.BorderSizePixel = 0; SF.LayoutOrder = 1
+Instance.new("UICorner",SF).CornerRadius = UDim.new(0,10)
+local sgL = Instance.new("UIListLayout",SF)
+sgL.FillDirection = Enum.FillDirection.Horizontal
+sgL.HorizontalAlignment = Enum.HorizontalAlignment.Center
+sgL.VerticalAlignment = Enum.VerticalAlignment.Center
+sgL.Padding = UDim.new(0,2)
+
+local EV, ISV, BWV
+do
+    local function statCell(icon, lbl, order)
+        local c = Instance.new("Frame",SF)
+        c.Size = UDim2.new(0.33,-2,1,-10)
+        c.BackgroundColor3 = Color3.fromRGB(16,16,16)
+        c.BorderSizePixel = 0; c.LayoutOrder = order
+        Instance.new("UICorner",c).CornerRadius = UDim.new(0,9)
+        mkLabel(c,icon,UDim2.new(1,0,0,20),UDim2.new(0,0,0,3),14,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),1,Enum.TextXAlignment.Center)
+        local v = mkLabel(c,"0",UDim2.new(1,0,0,14),UDim2.new(0,0,0,22),12,Enum.Font.GothamBold,Color3.fromRGB(255,255,255),1,Enum.TextXAlignment.Center)
+        mkLabel(c,lbl,UDim2.new(1,0,0,12),UDim2.new(0,0,0,38),9,nil,Color3.fromRGB(120,120,120),1,Enum.TextXAlignment.Center)
+        return v
+    end
+    EV  = statCell("$","EARNINGS",1)
+    ISV = statCell("#","SOLD",2)
+    BWV = statCell("W","BIDS WON",3)
+end
+
+-- Toggle helper
+local nextOrder = 10
+-- Registry of GUI controls for the Profiles/Save-Settings feature.
+-- Each control registers { get=fn()->value, set=fn(value) } keyed by its label
+-- (or an explicit key). Save reads every get(); Load applies every set().
+local controls = {}
+local function section(txt)
+    local holder = Instance.new("Frame",SC)
+    holder.Size = UDim2.new(1,0,0,24)
+    holder.BackgroundTransparency = 1
+    holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    local bar = Instance.new("Frame",holder)
+    bar.Size = UDim2.new(0,3,0,12); bar.Position = UDim2.new(0,4,0.5,-5)
+    bar.BackgroundColor3 = Color3.fromRGB(220,20,20); bar.BorderSizePixel = 0
+    Instance.new("UICorner",bar).CornerRadius = UDim.new(1,0)
+    local l = Instance.new("TextLabel",holder)
+    l.Size = UDim2.new(1,-18,1,0); l.Position = UDim2.new(0,14,0,0)
+    l.BackgroundTransparency = 1
+    l.Text = string.upper(txt)
+    l.TextColor3 = Color3.fromRGB(220,20,20)
+    l.TextSize = 11; l.Font = Enum.Font.GothamBold
+    l.TextXAlignment = Enum.TextXAlignment.Left
+end
+
+local function toggle(icon, txt, onFn, key)
+    local row = Instance.new("Frame",SC)
+    row.Size = UDim2.new(1,0,0,44)
+    row.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,11)
+    local rst = Instance.new("UIStroke",row); rst.Color = Color3.fromRGB(220,20,20); rst.Transparency = 0.95; rst.Thickness = 1
+    mkLabel(row,icon,UDim2.new(0,32,1,0),UDim2.new(0,8,0,0),14,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),1,Enum.TextXAlignment.Center)
+    mkLabel(row,txt,UDim2.new(1,-90,1,0),UDim2.new(0,36,0,0),12,nil,Color3.fromRGB(200,200,200),1,Enum.TextXAlignment.Left)
+
+    local track = Instance.new("Frame",row)
+    track.Size = UDim2.new(0,44,0,22)
+    track.Position = UDim2.new(1,-50,0.5,-11)
+    track.BackgroundColor3 = Color3.fromRGB(24,24,24)
+    track.BorderSizePixel = 0
+    Instance.new("UICorner",track).CornerRadius = UDim.new(1,0)
+    local thumb = Instance.new("Frame",track)
+    thumb.Size = UDim2.new(0,16,0,16)
+    thumb.Position = UDim2.new(0,3,0.5,-8)
+    thumb.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    thumb.BorderSizePixel = 0
+    Instance.new("UICorner",thumb).CornerRadius = UDim.new(1,0)
+
+    local on = false
+    local ti = TweenInfo.new(0.18, Enum.EasingStyle.Quad)
+    local btn = Instance.new("TextButton",row)
+    btn.Size = UDim2.new(1,0,1,0)
+    btn.BackgroundTransparency = 1; btn.Text = ""
+
+    local function set(state)
+        on = state
+        if on then
+            TweenService:Create(track,ti,{BackgroundColor3=Color3.fromRGB(220,20,20)}):Play()
+            TweenService:Create(thumb,ti,{Position=UDim2.new(0,25,0.5,-8),BackgroundColor3=Color3.new(1,1,1)}):Play()
+        else
+            TweenService:Create(track,ti,{BackgroundColor3=Color3.fromRGB(24,24,24)}):Play()
+            TweenService:Create(thumb,ti,{Position=UDim2.new(0,3,0.5,-8),BackgroundColor3=Color3.fromRGB(100,100,100)}):Play()
+        end
+        onFn(on)
+    end
+    btn.MouseButton1Click:Connect(function() set(not on) end)
+    local defaultState = false
+    if key and State[key] ~= nil then
+        defaultState = State[key]
+    elseif State[txt] ~= nil then
+        defaultState = State[txt]
+    end
+    set(defaultState)
+    controls[key or txt] = {
+        get = function() return on end,
+        set = function(v) set(v and true or false) end,
+    }
+    return set
+end
+
+local function actionBtn(txt, color, fn)
+    local row = Instance.new("Frame",SC)
+    row.Size = UDim2.new(1,0,0,36)
+    row.BackgroundTransparency = 1
+    row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    row.Parent = SC
+    local b = Instance.new("TextButton",row)
+    b.Size = UDim2.new(1,-4,1,-8)
+    b.Position = UDim2.new(0,2,0,4)
+    b.BackgroundColor3 = color
+    b.Text = txt; b.TextColor3 = Color3.new(1,1,1)
+    b.TextSize = 12; b.Font = Enum.Font.GothamBold
+    b.BorderSizePixel = 0
+    Instance.new("UICorner",b).CornerRadius = UDim.new(0,7)
+    b.MouseButton1Click:Connect(function()
+        TweenService:Create(b,TweenInfo.new(0.08),{BackgroundColor3=Color3.fromRGB(255,30,30)}):Play()
+        task.delay(0.15,function() TweenService:Create(b,TweenInfo.new(0.1),{BackgroundColor3=color}):Play() end)
+        fn()
+    end)
+end
+
+local function slider(lbl, minV, maxV, defV, fn, key)
+    local row = Instance.new("Frame",SC)
+    row.Size = UDim2.new(1,0,0,52)
+    row.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,9)
+
+    mkLabel(row,lbl,UDim2.new(0.58,0,0,20),UDim2.new(0,10,0,4),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
+    local vl = mkLabel(row,tostring(defV),UDim2.new(0.38,0,0,20),UDim2.new(0.6,0,0,4),12,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),1,Enum.TextXAlignment.Right)
+
+    local trk = Instance.new("Frame",row)
+    trk.Size = UDim2.new(1,-20,0,6)
+    trk.Position = UDim2.new(0,10,0,34)
+    trk.BackgroundColor3 = Color3.fromRGB(24,24,24)
+    trk.BorderSizePixel = 0
+    Instance.new("UICorner",trk).CornerRadius = UDim.new(1,0)
+    local pct = (defV-minV)/(maxV-minV)
+    local fl = Instance.new("Frame",trk)
+    fl.Size = UDim2.new(pct,0,1,0)
+    fl.BackgroundColor3 = Color3.fromRGB(220,20,20)
+    fl.BorderSizePixel = 0
+    Instance.new("UICorner",fl).CornerRadius = UDim.new(1,0)
+    local th = Instance.new("TextButton",trk)
+    th.Size = UDim2.new(0,14,0,14)
+    th.Position = UDim2.new(pct,-7,0.5,-7)
+    th.BackgroundColor3 = Color3.fromRGB(240,240,240)
+    th.Text = ""; th.BorderSizePixel = 0; th.ZIndex = 2
+    Instance.new("UICorner",th).CornerRadius = UDim.new(1,0)
+
+    local function setSlider(v)
+        v = math.clamp(math.floor(tonumber(v) or defV), minV, maxV)
+        local r = (v - minV)/(maxV - minV)
+        fl.Size = UDim2.new(r,0,1,0)
+        th.Position = UDim2.new(r,-7,0.5,-7)
+        vl.Text = tostring(v); fn(v)
+    end
+
+    local drag = false
+    th.MouseButton1Down:Connect(function() drag = true end)
+    track(UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = false end
+    end))
+    track(RunService.RenderStepped:Connect(function()
+        if not drag then return end
+        local r = math.clamp((UserInputService:GetMouseLocation().X - trk.AbsolutePosition.X)/trk.AbsoluteSize.X,0,1)
+        setSlider(minV + r*(maxV-minV))
+    end))
+    controls[key or lbl] = {
+        get = function() return tonumber(vl.Text) or defV end,
+        set = setSlider,
+    }
+end
+
+-- Compact checkbox row for checklists (rarity / mutation)
+local function checkRow(labelText, getState, setState, indent)
+    local row = Instance.new("Frame",SC)
+    row.Size = UDim2.new(1,0,0,26)
+    row.BackgroundColor3 = Color3.fromRGB(10,10,10)
+    row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
+    local x = indent or 12
+    local box = Instance.new("Frame",row)
+    box.Size = UDim2.new(0,16,0,16)
+    box.Position = UDim2.new(0,x,0.5,-8)
+    box.BorderSizePixel = 0
+    Instance.new("UICorner",box).CornerRadius = UDim.new(0,4)
+    local check = mkLabel(box,"",UDim2.new(1,0,1,0),UDim2.new(0,0,0,-1),13,Enum.Font.GothamBold,Color3.new(1,1,1),2,Enum.TextXAlignment.Center)
+    mkLabel(row,labelText,UDim2.new(1,-(x+30),1,0),UDim2.new(0,x+24,0,0),11,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
+    local btn = Instance.new("TextButton",row)
+    btn.Size = UDim2.new(1,0,1,0); btn.BackgroundTransparency = 1; btn.Text = ""
+    local function refresh()
+        local on = getState()
+        box.BackgroundColor3 = on and Color3.fromRGB(220,20,20) or Color3.fromRGB(24,24,24)
+        check.Text = on and "✓" or ""
+    end
+    btn.MouseButton1Click:Connect(function() setState(not getState()); refresh() end)
+    refresh()
+    return refresh
+end
+
+-- Number input row (typed value, no slider cap) for things like Min Price
+local function numberInput(labelText, default, onChange, key)
+    local row = Instance.new("Frame",SC)
+    row.Size = UDim2.new(1,0,0,38)
+    row.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
+    mkLabel(row,labelText,UDim2.new(0.55,0,1,0),UDim2.new(0,12,0,0),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
+    local box = Instance.new("TextBox",row)
+    box.Size = UDim2.new(0,96,0,24); box.Position = UDim2.new(1,-106,0.5,-12)
+    box.BackgroundColor3 = Color3.fromRGB(20,20,20); box.BorderSizePixel = 0
+    box.Text = tostring(default); box.TextColor3 = Color3.new(1,1,1); box.TextSize = 12
+    box.Font = Enum.Font.GothamBold; box.ClearTextOnFocus = false
+    box.PlaceholderText = "any number"
+    Instance.new("UICorner",box).CornerRadius = UDim.new(0,6)
+    local st = Instance.new("UIStroke",box); st.Color = Color3.fromRGB(220,20,20); st.Transparency = 0.6; st.Thickness = 1
+    box.FocusLost:Connect(function()
+        local n = tonumber(box.Text)
+        if n then onChange(n); box.Text = tostring(n) else box.Text = tostring(default) end
+    end)
+    controls[key or labelText] = {
+        get = function() return tonumber(box.Text) or default end,
+        set = function(v) local n = tonumber(v) or default; box.Text = tostring(n); onChange(n) end,
+    }
+    return box
+end
+
+-- Read-only label row for status displays (e.g. Quick Sell Rate)
+local function labelRow(labelText, defaultVal)
+    local row = Instance.new("Frame",SC)
+    row.Size = UDim2.new(1,0,0,36)
+    row.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
+    local rst = Instance.new("UIStroke",row); rst.Color = Color3.fromRGB(220,20,20); rst.Transparency = 0.95; rst.Thickness = 1
+    
+    mkLabel(row, labelText, UDim2.new(0.6,0,1,0), UDim2.new(0,12,0,0), 12, nil, Color3.fromRGB(180,180,180), 1, Enum.TextXAlignment.Left)
+    local valLabel = mkLabel(row, defaultVal, UDim2.new(0.35,0,1,0), UDim2.new(0.6,0,0,0), 12, Enum.Font.GothamBold, Color3.fromRGB(220,20,20), 1, Enum.TextXAlignment.Right)
+    
+    return valLabel
+end
+
+-- Collapsible dropdown holding a checklist (space-saving, modern)
+-- items: array of names ; getState(name)->bool ; setState(name,bool)
+local function dropdown(titleText, items, getState, setState, key)
+    local rowH = 26
+    local contentH = 30 * #items + 34
+    local headH = 40
+
+    local holder = Instance.new("Frame", SC)
+    holder.Size = UDim2.new(1,0,0,headH)
+    holder.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    holder.BorderSizePixel = 0
+    holder.ClipsDescendants = true
+    holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner",holder).CornerRadius = UDim.new(0,10)
+    local hst = Instance.new("UIStroke",holder); hst.Color = Color3.fromRGB(220,20,20); hst.Transparency = 0.8; hst.Thickness = 1
+
+    local head = Instance.new("Frame",holder)
+    head.Size = UDim2.new(1,0,0,headH); head.BackgroundTransparency = 1
+    mkLabel(head,titleText,UDim2.new(1,-90,1,0),UDim2.new(0,14,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),2)
+    local badge = mkLabel(head,"",UDim2.new(0,48,1,0),UDim2.new(1,-72,0,0),11,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),2,Enum.TextXAlignment.Right)
+    local chev = mkLabel(head,"\226\150\190",UDim2.new(0,20,1,0),UDim2.new(1,-26,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(140,140,140),2,Enum.TextXAlignment.Center)
+    local hbtn = Instance.new("TextButton",head)
+    hbtn.Size = UDim2.new(1,0,1,0); hbtn.BackgroundTransparency = 1; hbtn.Text = ""; hbtn.ZIndex = 3
+
+    local content = Instance.new("Frame",holder)
+    content.Position = UDim2.new(0,0,0,headH); content.Size = UDim2.new(1,0,0,contentH)
+    content.BackgroundTransparency = 1
+    local cl = Instance.new("UIListLayout",content); cl.SortOrder = Enum.SortOrder.LayoutOrder; cl.Padding = UDim.new(0,4)
+    local cpad = Instance.new("UIPadding",content)
+    cpad.PaddingTop = UDim.new(0,2); cpad.PaddingLeft = UDim.new(0,8); cpad.PaddingRight = UDim.new(0,8)
+
+    local refreshers = {}
+    local function updateBadge()
+        local c = 0; for _,it in ipairs(items) do if getState(it) then c = c + 1 end end
+        badge.Text = c.."/"..#items
+    end
+
+    local quick = Instance.new("Frame",content)
+    quick.Size = UDim2.new(1,0,0,24); quick.BackgroundTransparency = 1; quick.LayoutOrder = 0
+    local function quickBtn(txt,xs,fn)
+        local b = Instance.new("TextButton",quick)
+        b.Size = UDim2.new(0,54,1,0); b.Position = UDim2.new(0,xs,0,0)
+        b.BackgroundColor3 = Color3.fromRGB(24,24,24); b.BorderSizePixel = 0
+        b.Text = txt; b.TextColor3 = Color3.fromRGB(180,180,180); b.TextSize = 10; b.Font = Enum.Font.GothamBold
+        Instance.new("UICorner",b).CornerRadius = UDim.new(0,6)
+        b.MouseButton1Click:Connect(fn)
+    end
+    quickBtn("All",0,function() for _,it in ipairs(items) do setState(it,true) end for _,r in ipairs(refreshers) do r() end updateBadge() end)
+    quickBtn("None",60,function() for _,it in ipairs(items) do setState(it,false) end for _,r in ipairs(refreshers) do r() end updateBadge() end)
+
+    for i,it in ipairs(items) do
+        local row = Instance.new("Frame",content)
+        row.Size = UDim2.new(1,0,0,rowH); row.BackgroundColor3 = Color3.fromRGB(16,16,16); row.BorderSizePixel = 0; row.LayoutOrder = i
+        Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
+        local cb = Instance.new("Frame",row)
+        cb.Size = UDim2.new(0,16,0,16); cb.Position = UDim2.new(0,8,0.5,-8); cb.BorderSizePixel = 0
+        Instance.new("UICorner",cb).CornerRadius = UDim.new(0,4)
+        local ck = mkLabel(cb,"",UDim2.new(1,0,1,0),UDim2.new(0,0,0,-1),12,Enum.Font.GothamBold,Color3.new(1,1,1),2,Enum.TextXAlignment.Center)
+        mkLabel(row,it,UDim2.new(1,-34,1,0),UDim2.new(0,32,0,0),11,nil,Color3.fromRGB(180,180,180),1)
+        local rb = Instance.new("TextButton",row); rb.Size = UDim2.new(1,0,1,0); rb.BackgroundTransparency = 1; rb.Text = ""
+        local function rf()
+            local on = getState(it)
+            cb.BackgroundColor3 = on and Color3.fromRGB(220,20,20) or Color3.fromRGB(28,28,28)
+            ck.Text = on and "\226\156\147" or ""
+        end
+        rb.MouseButton1Click:Connect(function() setState(it, not getState(it)); rf(); updateBadge() end)
+        refreshers[#refreshers+1] = rf
+        rf()
+    end
+    updateBadge()
+
+    local open = false
+    hbtn.MouseButton1Click:Connect(function()
+        open = not open
+        local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
+        TweenService:Create(holder,ti,{Size = UDim2.new(1,0,0, open and (headH+contentH) or headH)}):Play()
+        TweenService:Create(chev,ti,{Rotation = open and 180 or 0}):Play()
+    end)
+    controls[key or titleText] = {
+        get = function()
+            local t = {}
+            for _,it in ipairs(items) do t[it] = getState(it) and true or false end
+            return t
+        end,
+        set = function(tbl)
+            if type(tbl) ~= "table" then return end
+            for _,it in ipairs(items) do setState(it, tbl[it] == true) end
+            for _,r in ipairs(refreshers) do r() end
+            updateBadge()
+        end,
+    }
+end
+
+local function teleportDropdown(titleText, items, onSelect)
+    local rowH = 26
+    local contentH = 30 * #items + 10
+    local headH = 40
+
+    local holder = Instance.new("Frame", SC)
+    holder.Size = UDim2.new(1,0,0,headH)
+    holder.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    holder.BorderSizePixel = 0
+    holder.ClipsDescendants = true
+    holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner",holder).CornerRadius = UDim.new(0,10)
+    local hst = Instance.new("UIStroke",holder); hst.Color = Color3.fromRGB(220,20,20); hst.Transparency = 0.8; hst.Thickness = 1
+
+    local head = Instance.new("Frame",holder)
+    head.Size = UDim2.new(1,0,0,headH); head.BackgroundTransparency = 1
+    mkLabel(head,titleText,UDim2.new(1,-60,1,0),UDim2.new(0,14,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),2)
+    local chev = mkLabel(head,"\226\150\190",UDim2.new(0,20,1,0),UDim2.new(1,-26,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(140,140,140),2,Enum.TextXAlignment.Center)
+    local hbtn = Instance.new("TextButton",head)
+    hbtn.Size = UDim2.new(1,0,1,0); hbtn.BackgroundTransparency = 1; hbtn.Text = ""; hbtn.ZIndex = 3
+
+    local content = Instance.new("Frame",holder)
+    content.Position = UDim2.new(0,0,0,headH); content.Size = UDim2.new(1,0,0,contentH)
+    content.BackgroundTransparency = 1
+    local cl = Instance.new("UIListLayout",content); cl.SortOrder = Enum.SortOrder.LayoutOrder; cl.Padding = UDim.new(0,4)
+    local cpad = Instance.new("UIPadding",content)
+    cpad.PaddingTop = UDim.new(0,2); cpad.PaddingLeft = UDim.new(0,8); cpad.PaddingRight = UDim.new(0,8)
+
+    local open = false
+    local function toggleOpen()
+        open = not open
+        local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
+        TweenService:Create(holder,ti,{Size = UDim2.new(1,0,0, open and (headH+contentH) or headH)}):Play()
+        TweenService:Create(chev,ti,{Rotation = open and 180 or 0}):Play()
+    end
+    hbtn.MouseButton1Click:Connect(toggleOpen)
+
+    for i, it in ipairs(items) do
+        local row = Instance.new("Frame",content)
+        row.Size = UDim2.new(1,0,0,rowH); row.BackgroundColor3 = Color3.fromRGB(16,16,16); row.BorderSizePixel = 0; row.LayoutOrder = i
+        Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
+        mkLabel(row,"»  " .. it,UDim2.new(1,-16,1,0),UDim2.new(0,10,0,0),11,Enum.Font.GothamBold,Color3.fromRGB(180,180,180),1)
+        local rb = Instance.new("TextButton",row); rb.Size = UDim2.new(1,0,1,0); rb.BackgroundTransparency = 1; rb.Text = ""
+        rb.MouseButton1Click:Connect(function()
+            toggleOpen()
+            onSelect(it)
+        end)
+    end
+end
+
+-- Build toggles
+section("AUTO-FARM")
+toggle("✦", "Auto Farm Loop", function(on)
+    State.AutoContainerFarm = on
+    if on then
+        runContainerFarmLoop()
+        startAutoPromptHandler()
+    else
+        if containerFarmThread then pcall(task.cancel, containerFarmThread) end
+        if autoPromptThread then pcall(task.cancel, autoPromptThread) end
+        State.status = "Auto Farm OFF"
+    end
+end, "AutoContainerFarm")
+dropdown("Auctions", DiscoveredContainers,
+function(c) return State.SelectedContainers[c] end,
+function(c, v) State.SelectedContainers[c] = v end)
+toggle("✦", "Auto Collect Lost Items", function(on)
+    State.AutoCollectLost = on
+    if on then
+        startAutoCollectLost()
+    else
+        if collectLostThread then pcall(task.cancel, collectLostThread) end
+        State.status = "Auto Collect Lost OFF"
+    end
+end, "AutoCollectLost")
+toggle("✦", "Auto Favorite Items", function(on)
+    State.AutoFavorite = on
+    if on then
+        startAutoFavorite()
+        State.status = "[Favorite] Auto-favorite ON"
+    else
+        if autoFavoriteThread then pcall(task.cancel, autoFavoriteThread) end
+        State.status = "Auto Favorite OFF"
+    end
+end, "AutoFavorite")
+numberInput("  Min Favorite Price ($)", State.AutoFavoritePrice, function(v) State.AutoFavoritePrice = v end)
+toggle("✦", "Auto Favorite Gavel Trophy", function(on)
+    State.AutoGavelFavorite = on
+    if on then
+        startAutoGavelFavorite()
+        State.status = "[Gavel] Auto-favorite Gavel ON"
+    else
+        if autoGavelFavoriteThread then pcall(task.cancel, autoGavelFavoriteThread) end
+        State.status = "Auto Favorite Gavel OFF"
+    end
+end, "AutoGavelFavorite")
+numberInput("  Min Gavel Trophy %", State.AutoGavelMinPercent, function(v) State.AutoGavelMinPercent = v end)
+dropdown("Gavel Trophy Filters", DiscoveredMutations,
+function(m) return State.SelectedGavelMutations[m] end,
+function(m, v) State.SelectedGavelMutations[m] = v end)
+toggle("✦", "Auto Favorite Accessories", function(on)
+    State.AutoAccessoryFavorite = on
+    if on then
+        startAutoAccessoryFavorite()
+        State.status = "[Accessory] Auto-favorite Accessory ON"
+    else
+        if autoAccessoryFavoriteThread then pcall(task.cancel, autoAccessoryFavoriteThread) end
+        State.status = "Auto Favorite Accessory OFF"
+    end
+end, "AutoAccessoryFavorite")
+numberInput("  Min Accessory %", State.AutoAccessoryMinPercent, function(v) State.AutoAccessoryMinPercent = v end)
+dropdown("Accessory Filters", DiscoveredAccessoryModifiers,
+function(a) return State.SelectedAccessoryModifiers[a] end,
+function(a, v) State.SelectedAccessoryModifiers[a] = v end)
+toggle("✦", "Auto Favorite Safe", function(on)
+    State.AutoFavoriteSafe = on
+    if on then
+        startAutoFavoriteSafe()
+        State.status = "[Favorite] Auto-favorite Safe ON"
+    else
+        if autoFavoriteSafeThread then pcall(task.cancel, autoFavoriteSafeThread) end
+        State.status = "Auto Favorite Safe OFF"
+    end
+end, "AutoFavoriteSafe")
+dropdown("Auto Favorite Safe Filters", DiscoveredSafes,
+function(s) return State.SelectedFavoriteSafes[s] end,
+function(s, v) State.SelectedFavoriteSafes[s] = v end)
+toggle("✦", "Auto Lockpick Safe", function(on)
+    State.AutoLockpickSafe = on
+    if on then
+        startAutoLockpickSafe()
+        State.status = "[Lockpick] Auto-lockpick ON"
+    else
+        if autoLockpickSafeThread then pcall(task.cancel, autoLockpickSafeThread) end
+        State.status = "Auto Lockpick OFF"
+    end
+end, "AutoLockpickSafe")
+dropdown("Safe Filters", DiscoveredSafes,
+function(s) return State.SelectedSafes[s] end,
+function(s, v) State.SelectedSafes[s] = v end)
+
+section("TELEPORTS")
+teleportDropdown("Select Location to Teleport", {
+    "My Plot",
+    "Back Alley",
+    "Farmyard",
+    "Junk Yard",
+    "Shipyard",
+    "Shopping Mall"
+}, function(selectedName)
+    performTeleport(selectedName)
+end)
+
+section("AUCTION")
+toggle("✦","Auto Start Auction",function(on)
+    State.AutoStartAuction = on
+    if on then startAutoStartAuction(); State.status = "[Auction] Auto-start ON"
+    else
+        if startAuctionThread then pcall(task.cancel, startAuctionThread) end
+        if startAuctionConn then startAuctionConn:Disconnect() end
+        if startAuctionUIConn then startAuctionUIConn:Disconnect() end
+        State.status = "Auto start auction OFF"
+    end
+end, "AutoStartAuction")
+toggle("✦","Auto Win Bids",function(on)
+    State.AutoBidWin = on
+    if on then startAutoBid(); State.status = "[Bid] Auto-bid ON"
+    else
+        if bidConn then bidConn:Disconnect() end
+        if auctionOpenConn then auctionOpenConn:Disconnect() end
+        State.status = "Auto bid OFF"
+    end
+end, "AutoBidWin")
+toggle("✦","Filter by Price",function(on)
+    State.AutoBidFilterPrice = on
+    State.status = on and "[Bid] Price filter ON" or "Bid filter OFF"
+end, "AuctionFilterPrice")
+numberInput("  Min Bid Value ($)", State.AutoBidMinValue, function(v) State.AutoBidMinValue = v end)
+
+section("Auto")
+toggle("✦","Auto Pickup Items",function(on)
+    State.AutoPickup = on
+    if on then startAutoPickup(); State.status = "[Pickup] Auto-pickup ON"
+    else
+        if pickupThread then pcall(task.cancel, pickupThread) end
+        if promptShownConn then promptShownConn:Disconnect() end
+        State.status = "Auto pickup OFF"
+    end
+end, "AutoPickup")
+toggle("✦","Heaviest First",function(on)
+    State.PrioritizeHeavy = on
+    State.status = on and "[Shelf] Heaviest first" or "Default order"
+end, "PrioritizeHeavy")
+
+toggle("✦","Auto Unload Car",function(on)
+    State.AutoUnload = on
+    if on then startAutoUnload(); State.status = "[Unload] Auto-unload ON"
+    else
+        if unloadThread then pcall(task.cancel, unloadThread) end
+        State.status = "Auto unload OFF"
+    end
+end, "AutoUnload")
+
+toggle("✦","Auto Add to Shelf",function(on)
+    State.AutoShelf = on
+    if on then startAutoShelf(); State.status = "[Shelf] Auto-shelf ON"
+    else
+        if shelfThread then pcall(task.cancel, shelfThread) end
+        if shelfSalesConn then shelfSalesConn:Disconnect() end
+        State.status = "Auto shelf OFF"
+    end
+end, "AutoShelf")
+toggle("✦","Shelf Price Filter",function(on)
+    State.ShelfFilterPrice = on
+    State.status = on and "[Shelf] Cheap filter ON" or "Shelf filter OFF"
+end, "ShelfFilterPrice")
+numberInput("  Max Shelf Price ($)", State.ShelfMaxPrice, function(v) State.ShelfMaxPrice = v end)
+
+section("Shop")
+toggle("✦","Sell Inventory",function(on)
+    State.SellInventory = on
+    if on then startSellInventory(); State.status = "[Shop] Sell Inventory ON"
+    else
+        if sellInventoryThread then pcall(task.cancel, sellInventoryThread) end
+        State.status = "Sell Inventory OFF"
+    end
+end, "SellInventory")
+local quickSellRateLabel = labelRow("Quick Sell Rate", "+0%")
+toggle("✦","Auto Grade Highest Value Item",function(on)
+    State.AutoGradeHighest = on
+    if on then startAutoGrade(); State.status = "[Grade] Auto-grade ON"
+    else
+        if autoGradeThread then pcall(task.cancel, autoGradeThread) end
+        State.status = "Auto-grade OFF"
+    end
+end, "AutoGradeHighest")
+toggle("✦","Auto Clean Highest Value Item",function(on)
+    State.AutoCleanHighest = on
+    if on then startAutoClean(); State.status = "[Clean] Auto-clean ON"
+    else
+        if autoCleanThread then pcall(task.cancel, autoCleanThread) end
+        State.status = "Auto-clean OFF"
+    end
+end, "AutoCleanHighest")
+toggle("✦","Auto Locksmith",function(on)
+    State.AutoLocksmith = on
+    if on then startAutoLocksmith(); State.status = "[Locksmith] Auto-locksmith ON"
+    else
+        if autoLocksmithThread then pcall(task.cancel, autoLocksmithThread) end
+        State.status = "Auto-locksmith OFF"
+    end
+end, "AutoLocksmith")
+
+-- ─── PICKUP FILTERS ─────────────────────────────────────────────────
+-- Each filter only matters when its toggle is ON. An item is picked only if it
+-- passes EVERY enabled filter. With all filters off, everything is picked (default).
+section("Auto Pick-Up Filters")
+
+-- Price: pick only if value >= Min Price (no upper limit)
+toggle("✦","Filter by Price",function(on)
+    State.FilterPrice = on
+    State.status = on and "[Filter] Price filter ON" or "Price filter OFF"
+end, "PickupFilterPrice")
+numberInput("  Min Price ($)", State.MinPrice, function(v) State.MinPrice = v end)
+
+-- Rarity: pick only checked rarities
+toggle("✦","Filter by Rarity",function(on)
+    State.FilterRarity = on
+    State.status = on and "[Filter] Rarity filter ON" or "Filter rarity OFF"
+end, "FilterRarity")
+dropdown("Allowed Rarities", { "Junk","Uncommon","Rare","Epic","Legendary","Mythical","Trophy","Lost" },
+    function(r) return State.RarityAllow[r] end,
+    function(r, v) State.RarityAllow[r] = v end)
+
+-- Mutation: pick only items that have one of the checked mutations
+-- ("(Normal)" matches items with no mutation at all)
+toggle("✦","Filter by Mutation",function(on)
+    State.FilterMutation = on
+    State.status = on and "[Filter] Mutation filter ON" or "Filter mutation OFF"
+end, "FilterMutation")
+dropdown("Allowed Mutations", {
+    "(Normal)",
+    "Silver","Gold","Chrome","Diamond","Gem","Hologram","Black","Void","Secret","Rainbow","Corrupted",
+    "Cobwebbed","Antique","Ancient","Timeless",
+    "Moonlit","Firefly","Wet","Shocked",
+    "Huge","Tiny","Exclusive","Dirty","Broken","Pure","Spotless",
+},
+    function(m) return State.MutationAllow[m] end,
+    function(m, v) State.MutationAllow[m] = v end)
+
+section("PLAYER")
+toggle("✦","Speed Hack",function(on)
+    State.SpeedHack = on; applySpeed()
+    State.status = on and "[Player] Speed ON" or "Speed OFF"
+end, "SpeedHack")
+toggle("✦","Anti-AFK",function(on)
+    State.AntiAFK = on
+    State.status = on and "[Player] Anti-AFK ON" or "Anti-AFK OFF"
+end, "AntiAFK")
+
+section("SETTINGS")
+numberInput("Max Bid Amount ($)", State.MaxBid, function(v) State.MaxBid = v end, "MaxBid")
+slider("Walk Speed",16,120,50,function(v)
+    State.WalkSpeed = v
+    if State.SpeedHack then
+        local h = character and character:FindFirstChildOfClass("Humanoid")
+        if h then h.WalkSpeed = v end
+    end
+end,"WalkSpeed")
+slider("Sell Delay (ms)",100,2000,250,function(v) State.SellDelay = v/1000 end,"SellDelay")
+slider("Bid Delay (ms)",50,800,150,function(v) State.BidDelay = v/1000 end,"BidDelay")
+
+-- ─── PROFILES (Save Settings) ───────────────────────────────────────
+-- Save the current ON/OFF toggles + all values to a named profile that
+-- persists on disk via the executor's file storage. Load applies a saved
+-- profile back onto every control (visual + state) in one click.
+section("PROFILES")
+
+local PROFILE_DIR = "SH_AutoFarm_Profiles"
+local hasFiles = (type(writefile) == "function" and type(readfile) == "function")
+
+local function ensureDir()
+    pcall(function()
+        if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder(PROFILE_DIR) then
+            makefolder(PROFILE_DIR)
+        end
+    end)
+end
+local function profilePath(name) return PROFILE_DIR .. "/" .. name .. ".json" end
+local function sanitize(name)
+    name = tostring(name or ""):gsub("[^%w _%-]", "")
+    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+    return name
+end
+local function listProfiles()
+    local out = {}
+    pcall(function()
+        if type(listfiles) == "function" and type(isfolder) == "function" and isfolder(PROFILE_DIR) then
+            for _, f in ipairs(listfiles(PROFILE_DIR)) do
+                local n = tostring(f):match("([^/\\]+)%.json$")
+                if n then out[#out + 1] = n end
+            end
+        end
+    end)
+    table.sort(out)
+    return out
+end
+local function saveProfile(name)
+    name = sanitize(name)
+    if name == "" or not hasFiles then return false end
+    ensureDir()
+    local data = {}
+    for key, c in pairs(controls) do
+        local ok, v = pcall(c.get)
+        if ok then data[key] = v end
+    end
+    return (pcall(function() writefile(profilePath(name), HttpService:JSONEncode(data)) end))
+end
+local function applyProfile(name)
+    if not hasFiles then return false end
+    local ok, raw = pcall(readfile, profilePath(name))
+    if not ok or type(raw) ~= "string" then return false end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok2 or type(data) ~= "table" then return false end
+    for key, v in pairs(data) do
+        local c = controls[key]
+        if c then pcall(c.set, v) end
+    end
+    return true
+end
+local function deleteProfile(name)
+    pcall(function()
+        if type(delfile) == "function" and type(isfile) == "function" and isfile(profilePath(name)) then
+            delfile(profilePath(name))
+        end
+    end)
+end
+
+-- Forward-declared so the Save button's click closure can call it.
+local rebuildList
+
+-- Profile name input
+local nameRow = Instance.new("Frame", SC)
+nameRow.Size = UDim2.new(1,0,0,38)
+nameRow.BackgroundColor3 = Color3.fromRGB(12,12,12)
+nameRow.BorderSizePixel = 0; nameRow.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+Instance.new("UICorner",nameRow).CornerRadius = UDim.new(0,8)
+mkLabel(nameRow,"Profile Name",UDim2.new(0.4,0,1,0),UDim2.new(0,12,0,0),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
+local nameBox = Instance.new("TextBox",nameRow)
+nameBox.Size = UDim2.new(0,150,0,24); nameBox.Position = UDim2.new(1,-160,0.5,-12)
+nameBox.BackgroundColor3 = Color3.fromRGB(20,20,20); nameBox.BorderSizePixel = 0
+nameBox.Text = ""; nameBox.PlaceholderText = "My Setup"
+nameBox.TextColor3 = Color3.new(1,1,1); nameBox.TextSize = 12
+nameBox.Font = Enum.Font.GothamBold; nameBox.ClearTextOnFocus = false
+Instance.new("UICorner",nameBox).CornerRadius = UDim.new(0,6)
+local nst = Instance.new("UIStroke",nameBox); nst.Color = Color3.fromRGB(220,20,20); nst.Transparency = 0.6; nst.Thickness = 1
+
+actionBtn("Save / Create Profile", Color3.fromRGB(180,20,20), function()
+    local nm = sanitize(nameBox.Text)
+    if nm == "" then State.status = "[!] Enter a profile name first"; return end
+    if saveProfile(nm) then
+        State.status = "[Profiles] Saved: " .. nm
+        if rebuildList then rebuildList() end
+    else
+        State.status = "[!] Save failed (executor file access?)"
+    end
+end)
+
+-- List of saved profiles (each row: Load + delete)
+local listHolder = Instance.new("Frame", SC)
+listHolder.Size = UDim2.new(1,0,0,0)
+listHolder.AutomaticSize = Enum.AutomaticSize.Y
+listHolder.BackgroundTransparency = 1
+listHolder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+local llay = Instance.new("UIListLayout",listHolder)
+llay.SortOrder = Enum.SortOrder.LayoutOrder; llay.Padding = UDim.new(0,4)
+
+rebuildList = function()
+    for _, ch in ipairs(listHolder:GetChildren()) do
+        if ch:IsA("Frame") then ch:Destroy() end
+    end
+    local profs = listProfiles()
+    if #profs == 0 then
+        local empty = Instance.new("Frame",listHolder)
+        empty.Size = UDim2.new(1,0,0,24); empty.BackgroundTransparency = 1; empty.LayoutOrder = 1
+        mkLabel(empty, hasFiles and "No saved profiles yet" or "Executor has no file access",
+            UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),11,nil,Color3.fromRGB(120,120,140),1,Enum.TextXAlignment.Center)
+        return
+    end
+    for i, name in ipairs(profs) do
+        local r = Instance.new("Frame",listHolder)
+        r.Size = UDim2.new(1,0,0,30); r.BackgroundColor3 = Color3.fromRGB(14,14,14)
+        r.BorderSizePixel = 0; r.LayoutOrder = i
+        Instance.new("UICorner",r).CornerRadius = UDim.new(0,7)
+        mkLabel(r,"»  "..name,UDim2.new(1,-100,1,0),UDim2.new(0,10,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),1,Enum.TextXAlignment.Left)
+        local lb = Instance.new("TextButton",r)
+        lb.Size = UDim2.new(0,56,0,22); lb.Position = UDim2.new(1,-90,0.5,-11)
+        lb.BackgroundColor3 = Color3.fromRGB(180,20,20); lb.BorderSizePixel = 0
+        lb.Text = "Load"; lb.TextColor3 = Color3.new(1,1,1); lb.TextSize = 11; lb.Font = Enum.Font.GothamBold
+        Instance.new("UICorner",lb).CornerRadius = UDim.new(0,6)
+        lb.MouseButton1Click:Connect(function()
+            if applyProfile(name) then
+                nameBox.Text = name
+                State.status = "[Profiles] Loaded: " .. name
+            else
+                State.status = "[!] Failed to load " .. name
+            end
+        end)
+        local db = Instance.new("TextButton",r)
+        db.Size = UDim2.new(0,24,0,22); db.Position = UDim2.new(1,-28,0.5,-11)
+        db.BackgroundColor3 = Color3.fromRGB(30,30,30); db.BorderSizePixel = 0
+        db.Text = "✕"; db.TextColor3 = Color3.fromRGB(220,20,20); db.TextSize = 12; db.Font = Enum.Font.GothamBold
+        Instance.new("UICorner",db).CornerRadius = UDim.new(0,6)
+        db.MouseButton1Click:Connect(function()
+            deleteProfile(name); State.status = "[Profiles] Deleted: " .. name; rebuildList()
+        end)
+    end
+end
+rebuildList()
+
+-- Footer
+local ft = Instance.new("Frame",SC)
+ft.Size = UDim2.new(1,0,0,22)
+ft.BackgroundColor3 = Color3.fromRGB(10,10,10)
+ft.BorderSizePixel = 0; ft.LayoutOrder = 999
+Instance.new("UICorner",ft).CornerRadius = UDim.new(0,6)
+mkLabel(ft,"Storage Hunters AutoFarm v3  |  MCP Crafted",UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),9,nil,Color3.fromRGB(100,100,100),1,Enum.TextXAlignment.Center)
+
+-- Minimize/Close
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    local ti = TweenInfo.new(0.22,Enum.EasingStyle.Quad)
+    if minimized then
+        TweenService:Create(MF,ti,{Size=UDim2.new(0,360,0,56)}):Play()
+        SC.Visible = false; MinBtn.Text = "+"
+    else
+        TweenService:Create(MF,ti,{Size=UDim2.new(0,360,0,520)}):Play()
+        SC.Visible = true; MinBtn.Text = "–"
+    end
+end)
+CloseBtn.MouseButton1Click:Connect(function()
+    TweenService:Create(MF,TweenInfo.new(0.2),{Size=UDim2.new(0,0,0,0),BackgroundTransparency=1}):Play()
+    task.delay(0.25,function() SG:Destroy() end)
+end)
+
+-- Drag
+local isDrag,dStart,dPos=false,nil,nil
+HD.InputBegan:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.MouseButton1 then isDrag=true;dStart=i.Position;dPos=MF.Position end
+end)
+track(UserInputService.InputChanged:Connect(function(i)
+    if isDrag and i.UserInputType==Enum.UserInputType.MouseMovement then
+        local d=i.Position-dStart
+        MF.Position=UDim2.new(dPos.X.Scale,dPos.X.Offset+d.X,dPos.Y.Scale,dPos.Y.Offset+d.Y)
+    end
+end))
+track(UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.MouseButton1 then isDrag=false end
+end))
+
+-- Heartbeat update
+local function cleanStatus(str)
+    if type(str) ~= "string" then return tostring(str) end
+    local clean = str
+    clean = clean:gsub("⚠️", "[!]")
+    clean = clean:gsub("✈️", "[TP]")
+    clean = clean:gsub("💲", "[$]")
+    clean = clean:gsub("🔨", "[Bid]")
+    clean = clean:gsub("🏪", "[Auction]")
+    clean = clean:gsub("🏆", "[Won]")
+    clean = clean:gsub("🏁", "[System]")
+    clean = clean:gsub("💰", "[Sell]")
+    clean = clean:gsub("💵", "[Sell]")
+    clean = clean:gsub("✅", "[OK]")
+    clean = clean:gsub("📭", "[Empty]")
+    clean = clean:gsub("📦", "[Cargo]")
+    clean = clean:gsub("🤲", "[Pickup]")
+    clean = clean:gsub("🛒", "[Shelf]")
+    clean = clean:gsub("🚶", "[Walk]")
+    clean = clean:gsub("🔍", "[Search]")
+    clean = clean:gsub("🚛", "[Car]")
+    clean = clean:gsub("⏳", "[Wait]")
+    clean = clean:gsub("🧬", "[Lost]")
+    clean = clean:gsub("🧼", "[Clean]")
+    clean = clean:gsub("🎓", "[Grade]")
+    clean = clean:gsub("🔑", "[Locksmith]")
+    clean = clean:gsub("⚡", "[Player]")
+    clean = clean:gsub("🛡️", "[Player]")
+    clean = clean:gsub("👁️", "[Player]")
+    clean = clean:gsub("⏱️", "[Wait]")
+    clean = clean:gsub("🔓", "[Lockpick]")
+    clean = clean:gsub("🎉", "[Unlocked]")
+    clean = clean:gsub("❌", "[Err]")
+    return clean
+end
+
+track(RunService.Heartbeat:Connect(function(dt)
+    SLbl.Text = "Status: " .. cleanStatus(State.status)
+    EV.Text  = "$" .. formatEarnings(State.earnings)
+    ISV.Text = tostring(State.itemsSold)
+    BWV.Text = tostring(State.bidsWon)
+
+    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoFavorite or State.AutoGavelFavorite or State.AutoAccessoryFavorite or State.AutoFavoriteSafe or State.AutoLockpickSafe or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
+    local p = math.abs(math.sin(tick()*2.5))
+    SDot.BackgroundColor3 = anyOn
+        and Color3.fromRGB(math.floor(120+135*p),20,20)
+        or Color3.fromRGB(40,40,40)
+
+    if not State.myPlot or not State.myPlot.Parent then
+        State.myPlot = findMyPlot()
+    end
+end))
+
+-- Dynamic Plot Sales (NPC) Tracker
+local lastSales = player:GetAttribute("LifetimeNPCSales") or 0
+local lastCash = player:GetAttribute("Cash") or 0
+local isNPCSelling = false
+local scriptStart = os.clock()
+
+track(player:GetAttributeChangedSignal("LifetimeNPCSales"):Connect(function()
+    local newSales = player:GetAttribute("LifetimeNPCSales") or 0
+    if newSales <= lastSales then return end -- only positive changes
+    
+    isNPCSelling = true
+    
+    -- If it's during script startup cooldown, just update baseline and return
+    if os.clock() - scriptStart < 1.5 then
+        lastSales = newSales
+        lastCash = player:GetAttribute("Cash") or 0
+        isNPCSelling = false
+        return
+    end
+    
+    -- Use task.spawn to handle async cash-wait without coroutine.yield
+    task.spawn(function()
+        local currentCash = player:GetAttribute("Cash") or 0
+        if currentCash == lastCash then
+            -- Cash has not replicated yet, poll briefly instead of yield
+            local waitStart = os.clock()
+            while os.clock() - waitStart < 1.5 do
+                task.wait(0.1)
+                currentCash = player:GetAttribute("Cash") or 0
+                if currentCash ~= lastCash then break end
+            end
+            currentCash = player:GetAttribute("Cash") or 0
+        end
+        
+        local diffSales = newSales - lastSales
+        local diffCash = currentCash - lastCash
+        
+        if diffSales > 0 then
+            if diffCash > 0 then
+                State.earnings = State.earnings + diffCash
+                State.itemsSold = State.itemsSold + diffSales
+            else
+                State.itemsSold = State.itemsSold + diffSales
+            end
+        end
+        
+        lastSales = newSales
+        lastCash = currentCash
+        isNPCSelling = false
+    end)
+end))
+
+track(player:GetAttributeChangedSignal("Cash"):Connect(function()
+    local val = player:GetAttribute("Cash") or 0
+    task.wait(0.05)
+    if not isNPCSelling then
+        lastCash = val
+    end
+end))
+
+-- Pawn Shop Rate Listener
+local function formatPawnRateText(rate)
+    local relRate = math.floor((rate - 1) * 100 + 0.5)
+    local sign = relRate >= 0 and "+" or ""
+    return sign .. tostring(relRate) .. "%"
+end
+
+local function updateQuickSellRate(rate)
+    if quickSellRateLabel then
+        quickSellRateLabel.Text = formatPawnRateText(rate)
+    end
+end
+
+task.spawn(function()
+    pcall(function()
+        local state = R.GetPawnState:InvokeServer()
+        if state and state.rate then
+            updateQuickSellRate(state.rate)
+        end
+    end)
+end)
+
+track(R.RateChanged.OnClientEvent:Connect(function(data)
+    if data and data.rate then
+        updateQuickSellRate(data.rate)
+    end
+end))
+
+-- Init
+startAntiAFK()
+State.myPlot = findMyPlot()
+
+MF.Size = UDim2.new(0,0,0,0)
+TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,360,0,520)}):Play()
+
+local plotName = State.myPlot and State.myPlot.Name or "Searching..."
+State.status = "[System] Ready! Plot: " .. plotName
+warn("[SH AutoFarm v3] Loaded! Plot:", plotName)

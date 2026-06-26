@@ -78,6 +78,11 @@ R.StartWash        = WashFolder:WaitForChild("StartWash")
 R.CollectWash      = WashFolder:WaitForChild("CollectWash")
 R.ClaimWashedItem  = WashFolder:WaitForChild("ClaimWashedItem")
 
+-- Vehicles
+local VehEvents    = Events:WaitForChild("Vehicles")
+R.GetOwnedVehicles = VehEvents:WaitForChild("GetOwnedVehicles")
+R.RequestSpawn     = VehEvents:WaitForChild("RequestSpawn")
+
 -- Grading
 local GradeFolder       = Events:WaitForChild("Grading")
 R.GetGradeSlotState = GradeFolder:WaitForChild("GetSlotState")
@@ -568,6 +573,8 @@ end
 local VehEvents     = Events:WaitForChild("Vehicles")
 R.GetVehItems   = VehEvents:WaitForChild("GetVehicleItems")
 R.TransferToInv = VehEvents:WaitForChild("TransferVehicleItemsToInventory")
+R.GetOwnedVehicles = VehEvents:WaitForChild("GetOwnedVehicles")
+R.RequestSpawn = VehEvents:WaitForChild("RequestSpawn")
 local UnloadItems   -- Items DB, for reading weights (heaviest-first option)
 pcall(function() UnloadItems = require(RS.Modules.Items) end)
 
@@ -1091,12 +1098,141 @@ local function getMyVehicle()
     return nil
 end
 
+local function isVehicleFarNotificationActive()
+    local toastsGui = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("ToastsGui")
+    local container = toastsGui and toastsGui:FindFirstChild("ToastContainer")
+    if container then
+        for _, child in ipairs(container:GetChildren()) do
+            for _, desc in ipairs(child:GetDescendants()) do
+                if desc:IsA("TextLabel") then
+                    local text = desc.Text:lower()
+                    if text:find("too far") or text:find("far away") or text:find("distance") then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+local VEHICLE_TIERS = {
+    ["heavyweight"] = 10,
+    ["flatbed"] = 9,
+    ["p-682"] = 8,
+    ["kei truck"] = 5,
+    ["rusty truck"] = 4,
+    ["duster"] = 2
+}
+local RARITY_TIERS = {
+    ["mythical"] = 6,
+    ["legendary"] = 5,
+    ["epic"] = 4,
+    ["rare"] = 3,
+    ["uncommon"] = 2,
+    ["common"] = 1
+}
+
+local function getBestOwnedVehicleName()
+    local ok, owned = pcall(function() return R.GetOwnedVehicles:InvokeServer() end)
+    if not ok or not owned or type(owned.vehicles) ~= "table" then
+        return nil
+    end
+    
+    local bestName = nil
+    local bestScore = -1
+    
+    for guid, info in pairs(owned.vehicles) do
+        local name = info.Name
+        if name then
+            local score = VEHICLE_TIERS[name:lower()]
+            if not score then
+                local rarity = tostring(info.Rarity or ""):lower()
+                score = RARITY_TIERS[rarity] or 1
+            end
+            if score > bestScore then
+                bestScore = score
+                bestName = name
+            end
+        end
+    end
+    return bestName or "Duster"
+end
+
+local function spawnMyBestVehicle()
+    local bestName = getBestOwnedVehicleName()
+    if bestName then
+        pcall(function() R.RequestSpawn:FireServer(bestName) end)
+    end
+end
+
 local function collectAllMyCarryables(garageModel)
     local carry = WS:FindFirstChild("_Carryables")
     if not carry or not rootPart or not garageModel then return end
     
     local garagePos = garageModel:GetPivot().Position
     local startCollect = os.clock()
+    
+    -- Check if vehicle is despawned or too far away
+    local veh = getMyVehicle()
+    if not veh or isVehicleFarNotificationActive() then
+        State.status = "🚛 Spawning best owned vehicle..."
+        local hum = character and character:FindFirstChildOfClass("Humanoid")
+        
+        -- Force exit seat if sitting
+        if hum and (hum.SeatPart or hum.Sit) then
+            local seatStart = os.clock()
+            while (hum.SeatPart or hum.Sit) and (os.clock() - seatStart) < 3 do
+                hum.Sit = false
+                hum.Jump = true
+                local seat = hum.SeatPart
+                if seat then
+                    local weld = seat:FindFirstChild("SeatWeld")
+                    if weld then pcall(function() weld:Destroy() end) end
+                end
+                task.wait(0.1)
+            end
+        end
+        
+        -- Find the prompt part
+        local prompt = garageModel:FindFirstChild("EnterAuction", true)
+        local promptPart = prompt and prompt.Parent
+        if promptPart and promptPart:IsA("BasePart") then
+            local pivotPos = garageModel:GetPivot().Position
+            local padPos = promptPart.Position
+            local dir = (padPos - pivotPos)
+            dir = Vector3.new(dir.X, 0, dir.Z).Unit
+            
+            local spawnPos = padPos + dir * 25 + Vector3.new(0, 2, 0)
+            local spawnCFrame = CFrame.new(spawnPos) * (promptPart.CFrame - promptPart.CFrame.Position)
+            
+            rootPart.CFrame = spawnCFrame
+            task.wait(0.25)
+            
+            -- Spawn the vehicle
+            spawnMyBestVehicle()
+            task.wait(0.8)
+            
+            -- Eject player from the seat right after spawning (just in case they got seated)
+            if hum then
+                local ejectStart = os.clock()
+                while (hum.SeatPart or hum.Sit) and (os.clock() - ejectStart) < 3 do
+                    hum.Sit = false
+                    hum.Jump = true
+                    local seat = hum.SeatPart
+                    if seat then
+                        local weld = seat:FindFirstChild("SeatWeld")
+                        if weld then pcall(function() weld:Destroy() end) end
+                    end
+                    task.wait(0.1)
+                end
+            end
+            
+            -- Teleport player back to the container door
+            rootPart.CFrame = promptPart.CFrame + Vector3.new(0, 2, 0)
+            task.wait(0.2)
+        end
+    end
     
     -- Loop until no owned carryables are left within 80 studs, or timeout (15s)
     while os.clock() - startCollect < 15 and State.AutoContainerFarm do
@@ -2138,8 +2274,60 @@ SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 SG.Parent = player.PlayerGui
 
 local MF = Instance.new("Frame")
-MF.Size = UDim2.new(0,360,0,520)
-MF.Position = UDim2.new(0,18,0.5,-260)
+local currentW, currentH = 360, 520
+local minimized = false
+
+local function adjustUIToScreen()
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    local viewport = camera.ViewportSize
+    local screenW, screenH = viewport.X, viewport.Y
+    if screenW == 0 or screenH == 0 then return end
+    
+    local targetW = currentW
+    local targetH = currentH
+    
+    if screenW < targetW + 30 then
+        targetW = math.max(280, screenW - 30)
+    end
+    if screenH < targetH + 30 then
+        targetH = math.max(300, screenH - 30)
+    end
+    
+    currentW = math.clamp(targetW, 280, 800)
+    currentH = math.clamp(targetH, 300, 1000)
+    
+    if not minimized then
+        MF.Size = UDim2.new(0, currentW, 0, currentH)
+    end
+    
+    -- Keep position clamped within screen bounds
+    local curPos = MF.Position
+    local curX = curPos.X.Offset
+    local curY = curPos.Y.Offset
+    
+    local maxX = screenW - currentW
+    local maxY = screenH - (minimized and 56 or currentH)
+    
+    curX = math.clamp(curX, 0, maxX)
+    curY = math.clamp(curY, 0, maxY)
+    
+    MF.Position = UDim2.new(0, curX, 0, curY)
+end
+
+-- Initialize position and size based on screen viewport
+local camera = workspace.CurrentCamera
+local viewport = camera and camera.ViewportSize
+local screenW, screenH = viewport and viewport.X or 800, viewport and viewport.Y or 600
+local defaultX = 18
+local defaultY = math.clamp(screenH/2 - 260, 0, math.max(0, screenH - 520))
+
+MF.Size = UDim2.new(0, 360, 0, 520)
+MF.Position = UDim2.new(0, defaultX, 0, defaultY)
+
+if camera then
+    track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(adjustUIToScreen))
+end
 MF.BackgroundColor3 = Color3.fromRGB(8,8,8)
 MF.BorderSizePixel = 0
 MF.Parent = SG
@@ -3044,15 +3232,14 @@ Instance.new("UICorner",ft).CornerRadius = UDim.new(0,6)
 mkLabel(ft,"Storage Hunters AutoFarm v3  |  MCP Crafted",UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),9,nil,Color3.fromRGB(100,100,100),1,Enum.TextXAlignment.Center)
 
 -- Minimize/Close
-local minimized = false
 MinBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     local ti = TweenInfo.new(0.22,Enum.EasingStyle.Quad)
     if minimized then
-        TweenService:Create(MF,ti,{Size=UDim2.new(0,360,0,56)}):Play()
+        TweenService:Create(MF,ti,{Size=UDim2.new(0,currentW,0,56)}):Play()
         SC.Visible = false; MinBtn.Text = "+"
     else
-        TweenService:Create(MF,ti,{Size=UDim2.new(0,360,0,520)}):Play()
+        TweenService:Create(MF,ti,{Size=UDim2.new(0,currentW,0,currentH)}):Play()
         SC.Visible = true; MinBtn.Text = "–"
     end
 end)
@@ -3061,19 +3248,78 @@ CloseBtn.MouseButton1Click:Connect(function()
     task.delay(0.25,function() SG:Destroy() end)
 end)
 
--- Drag
+-- Drag (Move) supporting Mouse & Touch
 local isDrag,dStart,dPos=false,nil,nil
 HD.InputBegan:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 then isDrag=true;dStart=i.Position;dPos=MF.Position end
+    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+        isDrag=true;dStart=i.Position;dPos=MF.Position
+    end
 end)
 track(UserInputService.InputChanged:Connect(function(i)
-    if isDrag and i.UserInputType==Enum.UserInputType.MouseMovement then
+    if isDrag and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
         local d=i.Position-dStart
         MF.Position=UDim2.new(dPos.X.Scale,dPos.X.Offset+d.X,dPos.Y.Scale,dPos.Y.Offset+d.Y)
     end
 end))
 track(UserInputService.InputEnded:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 then isDrag=false end
+    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+        isDrag=false
+    end
+end))
+
+-- Resize Handle (diagonal drag lines in bottom-right corner)
+local ResizeHandle = Instance.new("Frame", MF)
+ResizeHandle.Name = "ResizeHandle"
+ResizeHandle.Size = UDim2.new(0, 18, 0, 18)
+ResizeHandle.Position = UDim2.new(1, -18, 1, -18)
+ResizeHandle.BackgroundTransparency = 1
+ResizeHandle.ZIndex = 10
+
+for i = 1, 2 do
+    local line = Instance.new("Frame", ResizeHandle)
+    line.Size = UDim2.new(0, 8 + i * 4, 0, 1)
+    line.Position = UDim2.new(1 - (8 + i * 4)/18, 0, 1 - (i * 5)/18, 0)
+    line.BackgroundColor3 = Color3.fromRGB(220, 20, 20)
+    line.BorderSizePixel = 0
+    line.Rotation = -45
+    line.ZIndex = 11
+end
+
+local isResize = false
+local rStart = nil
+local rStartSize = nil
+
+ResizeHandle.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        isResize = true
+        rStart = i.Position
+        rStartSize = Vector2.new(currentW, currentH)
+        i.ProcessedEvent = true
+    end
+end)
+track(UserInputService.InputChanged:Connect(function(i)
+    if isResize and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local delta = i.Position - rStart
+        local newW = math.clamp(rStartSize.X + delta.X, 280, 800)
+        local newH = math.clamp(rStartSize.Y + delta.Y, 300, 1000)
+        
+        local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+        if viewport then
+            newW = math.min(newW, viewport.X - 20)
+            newH = math.min(newH, viewport.Y - 20)
+        end
+        
+        currentW = newW
+        currentH = newH
+        if not minimized then
+            MF.Size = UDim2.new(0, currentW, 0, currentH)
+        end
+    end
+end))
+track(UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        isResize = false
+    end
 end))
 
 -- Heartbeat update
@@ -3222,9 +3468,9 @@ startAntiAFK()
 State.myPlot = findMyPlot()
 
 MF.Size = UDim2.new(0,0,0,0)
-TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,360,0,520)}):Play()
+adjustUIToScreen()
+TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,currentW,0,currentH)}):Play()
 
 local plotName = State.myPlot and State.myPlot.Name or "Searching..."
 State.status = "[System] Ready! Plot: " .. plotName
 warn("[SH AutoFarm v3] Loaded! Plot:", plotName)
-

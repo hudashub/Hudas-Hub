@@ -2263,6 +2263,12 @@ local function startAutoPromptHandler()
 end
 
 -- ─── GUI ─────────────────────────────────────────────────────────────
+-- NOTE: the GUI build + init below is wrapped in a function so its locals get
+-- their OWN register budget. Luau caps locals at 200 PER FUNCTION scope; the
+-- top-level chunk was overflowing (~213 locals) which made loadstring return nil
+-- (the misleading "attempt to call a nil value" you saw). Inside this function the
+-- chunk's helpers become upvalues and no longer count toward the 200 local cap.
+local function __SH_main()
 if player.PlayerGui:FindFirstChild("SH_AF3") then player.PlayerGui.SH_AF3:Destroy() end
 if player.PlayerGui:FindFirstChild("SH_AutoFarm_v2") then player.PlayerGui.SH_AutoFarm_v2:Destroy() end
 if player.PlayerGui:FindFirstChild("SH_AutoFarm") then player.PlayerGui.SH_AutoFarm:Destroy() end
@@ -3396,3 +3402,6 @@ TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirect
 local plotName = State.myPlot and State.myPlot.Name or "Searching..."
 State.status = "[System] Ready! Plot: " .. plotName
 warn("[SH AutoFarm v3] Loaded! Plot:", plotName)
+end -- __SH_main
+
+__SH_main()

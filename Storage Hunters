@@ -2274,8 +2274,6 @@ SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 SG.Parent = player.PlayerGui
 
 local MF = Instance.new("Frame")
-MF.Size = UDim2.new(0,360,0,520)
-MF.Position = UDim2.new(0,18,0.5,-260)
 MF.BackgroundColor3 = Color3.fromRGB(8,8,8)
 MF.BorderSizePixel = 0
 MF.Parent = SG
@@ -2332,14 +2330,13 @@ local function hdBtn(txt, xOff, bg)
     Instance.new("UICorner",b).CornerRadius = UDim.new(1,0)
     return b
 end
-local CloseBtn = hdBtn("✕",-38,Color3.fromRGB(20,20,20))
+local CloseBtn = hdBtn("X",-38,Color3.fromRGB(20,20,20))
 CloseBtn.TextColor3 = Color3.fromRGB(220,20,20)
-local MinBtn   = hdBtn("–",-72,Color3.fromRGB(20,20,20))
+local MinBtn   = hdBtn("-",-72,Color3.fromRGB(20,20,20))
 MinBtn.TextColor3 = Color3.fromRGB(180,180,180)
 
 -- Content
 local SC = Instance.new("ScrollingFrame",MF)
-SC.Size = UDim2.new(1,-14,1,-62)
 SC.Position = UDim2.new(0,7,0,60)
 SC.BackgroundTransparency = 1
 SC.BorderSizePixel = 0
@@ -2350,6 +2347,35 @@ SC.AutomaticCanvasSize = Enum.AutomaticSize.Y
 local lay = Instance.new("UIListLayout",SC)
 lay.SortOrder = Enum.SortOrder.LayoutOrder
 lay.Padding = UDim.new(0,6)
+
+-- Responsive Sizing and Position Manager
+local minimized = false
+local currentWidth = 360
+local currentHeight = 520
+
+local function getLayoutSize()
+    local viewport = workspace.CurrentCamera.ViewportSize
+    local screenW, screenH = viewport.X, viewport.Y
+    local width = math.clamp(screenW * 0.3, 280, 360)
+    local height = math.clamp(screenH - 100, 220, 520)
+    return width, height
+end
+
+local function applyLayout()
+    local w, h = getLayoutSize()
+    currentWidth = w
+    currentHeight = h
+    if minimized then
+        MF.Size = UDim2.new(0, w, 0, 56)
+    else
+        MF.Size = UDim2.new(0, w, 0, h)
+        SC.Size = UDim2.new(1, -14, 1, -62)
+    end
+    MF.Position = UDim2.new(0, 18, 0.5, -MF.Size.Y.Offset/2)
+end
+
+applyLayout()
+track(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(applyLayout))
 
 -- Status bar
 local SB = Instance.new("Frame",SC)
@@ -2421,6 +2447,7 @@ local function section(txt)
 end
 
 local function toggle(icon, txt, onFn, key)
+    if icon == "✦" then icon = "+" end
     local row = Instance.new("Frame",SC)
     row.Size = UDim2.new(1,0,0,44)
     row.BackgroundColor3 = Color3.fromRGB(12,12,12)
@@ -2569,7 +2596,7 @@ local function checkRow(labelText, getState, setState, indent)
     local function refresh()
         local on = getState()
         box.BackgroundColor3 = on and Color3.fromRGB(220,20,20) or Color3.fromRGB(24,24,24)
-        check.Text = on and "✓" or ""
+        check.Text = on and "X" or ""
     end
     btn.MouseButton1Click:Connect(function() setState(not getState()); refresh() end)
     refresh()
@@ -2638,7 +2665,7 @@ local function dropdown(titleText, items, getState, setState, key)
     head.Size = UDim2.new(1,0,0,headH); head.BackgroundTransparency = 1
     mkLabel(head,titleText,UDim2.new(1,-90,1,0),UDim2.new(0,14,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),2)
     local badge = mkLabel(head,"",UDim2.new(0,48,1,0),UDim2.new(1,-72,0,0),11,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),2,Enum.TextXAlignment.Right)
-    local chev = mkLabel(head,"\226\150\190",UDim2.new(0,20,1,0),UDim2.new(1,-26,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(140,140,140),2,Enum.TextXAlignment.Center)
+    local chev = mkLabel(head,"v",UDim2.new(0,20,1,0),UDim2.new(1,-26,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(140,140,140),2,Enum.TextXAlignment.Center)
     local hbtn = Instance.new("TextButton",head)
     hbtn.Size = UDim2.new(1,0,1,0); hbtn.BackgroundTransparency = 1; hbtn.Text = ""; hbtn.ZIndex = 3
 
@@ -2681,7 +2708,7 @@ local function dropdown(titleText, items, getState, setState, key)
         local function rf()
             local on = getState(it)
             cb.BackgroundColor3 = on and Color3.fromRGB(220,20,20) or Color3.fromRGB(28,28,28)
-            ck.Text = on and "\226\156\147" or ""
+            ck.Text = on and "X" or ""
         end
         rb.MouseButton1Click:Connect(function() setState(it, not getState(it)); rf(); updateBadge() end)
         refreshers[#refreshers+1] = rf
@@ -2694,7 +2721,7 @@ local function dropdown(titleText, items, getState, setState, key)
         open = not open
         local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
         TweenService:Create(holder,ti,{Size = UDim2.new(1,0,0, open and (headH+contentH) or headH)}):Play()
-        TweenService:Create(chev,ti,{Rotation = open and 180 or 0}):Play()
+        chev.Text = open and "^" or "v"
     end)
     controls[key or titleText] = {
         get = function()
@@ -2728,7 +2755,7 @@ local function teleportDropdown(titleText, items, onSelect)
     local head = Instance.new("Frame",holder)
     head.Size = UDim2.new(1,0,0,headH); head.BackgroundTransparency = 1
     mkLabel(head,titleText,UDim2.new(1,-60,1,0),UDim2.new(0,14,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),2)
-    local chev = mkLabel(head,"\226\150\190",UDim2.new(0,20,1,0),UDim2.new(1,-26,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(140,140,140),2,Enum.TextXAlignment.Center)
+    local chev = mkLabel(head,"v",UDim2.new(0,20,1,0),UDim2.new(1,-26,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(140,140,140),2,Enum.TextXAlignment.Center)
     local hbtn = Instance.new("TextButton",head)
     hbtn.Size = UDim2.new(1,0,1,0); hbtn.BackgroundTransparency = 1; hbtn.Text = ""; hbtn.ZIndex = 3
 
@@ -2744,7 +2771,7 @@ local function teleportDropdown(titleText, items, onSelect)
         open = not open
         local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
         TweenService:Create(holder,ti,{Size = UDim2.new(1,0,0, open and (headH+contentH) or headH)}):Play()
-        TweenService:Create(chev,ti,{Rotation = open and 180 or 0}):Play()
+        chev.Text = open and "^" or "v"
     end
     hbtn.MouseButton1Click:Connect(toggleOpen)
 
@@ -2752,7 +2779,7 @@ local function teleportDropdown(titleText, items, onSelect)
         local row = Instance.new("Frame",content)
         row.Size = UDim2.new(1,0,0,rowH); row.BackgroundColor3 = Color3.fromRGB(16,16,16); row.BorderSizePixel = 0; row.LayoutOrder = i
         Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
-        mkLabel(row,"»  " .. it,UDim2.new(1,-16,1,0),UDim2.new(0,10,0,0),11,Enum.Font.GothamBold,Color3.fromRGB(180,180,180),1)
+        mkLabel(row,">  " .. it,UDim2.new(1,-16,1,0),UDim2.new(0,10,0,0),11,Enum.Font.GothamBold,Color3.fromRGB(180,180,180),1)
         local rb = Instance.new("TextButton",row); rb.Size = UDim2.new(1,0,1,0); rb.BackgroundTransparency = 1; rb.Text = ""
         rb.MouseButton1Click:Connect(function()
             toggleOpen()
@@ -3145,7 +3172,7 @@ rebuildList = function()
         r.Size = UDim2.new(1,0,0,30); r.BackgroundColor3 = Color3.fromRGB(14,14,14)
         r.BorderSizePixel = 0; r.LayoutOrder = i
         Instance.new("UICorner",r).CornerRadius = UDim.new(0,7)
-        mkLabel(r,"»  "..name,UDim2.new(1,-100,1,0),UDim2.new(0,10,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),1,Enum.TextXAlignment.Left)
+        mkLabel(r,">  "..name,UDim2.new(1,-100,1,0),UDim2.new(0,10,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),1,Enum.TextXAlignment.Left)
         local lb = Instance.new("TextButton",r)
         lb.Size = UDim2.new(0,56,0,22); lb.Position = UDim2.new(1,-90,0.5,-11)
         lb.BackgroundColor3 = Color3.fromRGB(180,20,20); lb.BorderSizePixel = 0
@@ -3162,7 +3189,7 @@ rebuildList = function()
         local db = Instance.new("TextButton",r)
         db.Size = UDim2.new(0,24,0,22); db.Position = UDim2.new(1,-28,0.5,-11)
         db.BackgroundColor3 = Color3.fromRGB(30,30,30); db.BorderSizePixel = 0
-        db.Text = "✕"; db.TextColor3 = Color3.fromRGB(220,20,20); db.TextSize = 12; db.Font = Enum.Font.GothamBold
+        db.Text = "X"; db.TextColor3 = Color3.fromRGB(220,20,20); db.TextSize = 12; db.Font = Enum.Font.GothamBold
         Instance.new("UICorner",db).CornerRadius = UDim.new(0,6)
         db.MouseButton1Click:Connect(function()
             deleteProfile(name); State.status = "[Profiles] Deleted: " .. name; rebuildList()
@@ -3180,16 +3207,16 @@ Instance.new("UICorner",ft).CornerRadius = UDim.new(0,6)
 mkLabel(ft,"Storage Hunters AutoFarm v3  |  MCP Crafted",UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),9,nil,Color3.fromRGB(100,100,100),1,Enum.TextXAlignment.Center)
 
 -- Minimize/Close
-local minimized = false
 MinBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     local ti = TweenInfo.new(0.22,Enum.EasingStyle.Quad)
+    local targetW, targetH = getLayoutSize()
     if minimized then
-        TweenService:Create(MF,ti,{Size=UDim2.new(0,360,0,56)}):Play()
+        TweenService:Create(MF,ti,{Size=UDim2.new(0,targetW,0,56)}):Play()
         SC.Visible = false; MinBtn.Text = "+"
     else
-        TweenService:Create(MF,ti,{Size=UDim2.new(0,360,0,520)}):Play()
-        SC.Visible = true; MinBtn.Text = "–"
+        TweenService:Create(MF,ti,{Size=UDim2.new(0,targetW,0,targetH)}):Play()
+        SC.Visible = true; MinBtn.Text = "-"
     end
 end)
 CloseBtn.MouseButton1Click:Connect(function()
@@ -3358,7 +3385,8 @@ startAntiAFK()
 State.myPlot = findMyPlot()
 
 MF.Size = UDim2.new(0,0,0,0)
-TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,360,0,520)}):Play()
+local targetW, targetH = getLayoutSize()
+TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,targetW,0,targetH)}):Play()
 
 local plotName = State.myPlot and State.myPlot.Name or "Searching..."
 State.status = "[System] Ready! Plot: " .. plotName

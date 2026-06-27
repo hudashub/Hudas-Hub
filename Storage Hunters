@@ -322,6 +322,8 @@ end
 -- ─── STATE ───────────────────────────────────────────────────────────
 State = {
     AutoContainerFarm = false,
+    AutoAcceptOffer   = false,
+    MinOfferPercent   = 0,
     CurrentAuctionESP = false,
     AutoCollectLost = false,
     AutoFavorite = false,
@@ -2232,6 +2234,116 @@ local function startAutoLockpickSafe()
     trackThread(autoLockpickSafeThread)
 end
 
+local function getItemBasePrice(itemRef)
+    if type(itemRef) == "string" and PlacedItems[itemRef] then
+        return PlacedItems[itemRef]
+    end
+    
+    local model = nil
+    if typeof(itemRef) == "Instance" then
+        model = itemRef
+    elseif type(itemRef) == "string" then
+        -- Search in carryables
+        local carry = WS:FindFirstChild("_Carryables")
+        if carry then
+            for _, item in ipairs(carry:GetChildren()) do
+                if item:GetAttribute("GUID") == itemRef then
+                    model = item
+                    break
+                end
+            end
+        end
+        if not model then
+            -- Search in plots
+            local plots = WS:FindFirstChild("_Plots")
+            if plots then
+                for _, plot in ipairs(plots:GetChildren()) do
+                    for _, item in ipairs(plot:GetDescendants()) do
+                        if item:GetAttribute("GUID") == itemRef then
+                            model = item
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    if model then
+        local id = tostring(model:GetAttribute("ItemId") or "")
+        local condition = tonumber(model:GetAttribute("Condition")) or 100
+        local mutators = {}
+        local mutsRaw = model:GetAttribute("Mutators")
+        if type(mutsRaw) == "string" and HttpService then
+            pcall(function()
+                local decoded = HttpService:JSONDecode(mutsRaw)
+                if type(decoded) == "table" then
+                    mutators = decoded
+                end
+            end)
+        end
+        return shelfPrice(id, { Condition = condition, Mutators = mutators })
+    end
+    return nil
+end
+
+local npcShopperConn = nil
+local function startAutoAcceptOffers()
+    if npcShopperConn then npcShopperConn:Disconnect() end
+    
+    local folder = Events:WaitForChild("NPCShopper", 10)
+    local showEvent = folder and folder:WaitForChild("ShowOffer", 10)
+    local respondEvent = folder and folder:WaitForChild("RespondOffer", 10)
+    if not showEvent or not respondEvent then return end
+    
+    npcShopperConn = showEvent.OnClientEvent:Connect(function(itemGuid, npcModel, itemName, offerPrice, basePrice)
+        warn(string.format("[SH AutoFarm] ShowOffer RAW: itemGuid=%s (%s), npcModel=%s (%s), itemName=%s (%s), offerPrice=%s (%s), basePrice=%s (%s)",
+            tostring(itemGuid), typeof(itemGuid),
+            tostring(npcModel), typeof(npcModel),
+            tostring(itemName), typeof(itemName),
+            tostring(offerPrice), typeof(offerPrice),
+            tostring(basePrice), typeof(basePrice)
+        ))
+        
+        local offerVal = tonumber(offerPrice) or 0
+        local baseVal = tonumber(basePrice) or 1
+        
+        local relativePercent = 0
+        if baseVal > 0 then
+            relativePercent = math.floor((offerVal / baseVal) * 100 + 0.5) - 100
+        end
+        
+        warn(string.format("[SH AutoFarm] Offer received: $%d (calculated relative: %+d%%) for item %s", offerVal, relativePercent, tostring(itemName)))
+        
+        if not State.AutoAcceptOffer then return end
+        
+        -- Small human-like delay so server processes state transitions cleanly
+        task.wait(0.8)
+        if not State.AutoAcceptOffer then return end
+        
+        local minThreshold = State.MinOfferPercent or 0
+        if relativePercent >= minThreshold then
+            State.status = string.format("💸 Auto-Accept Offer: $%d (%+d%%)", offerVal, relativePercent)
+            pcall(function()
+                respondEvent:FireServer(itemGuid, true)
+            end)
+        else
+            State.status = string.format("❌ Auto-Decline Offer: $%d (%+d%%)", offerVal, relativePercent)
+            pcall(function()
+                respondEvent:FireServer(itemGuid, false)
+            end)
+        end
+        
+        -- Clean up client-side BillboardGui to prevent overlapping elements
+        local guiName = "NPCShopperOffer_" .. itemGuid
+        local offerGui = player.PlayerGui:FindFirstChild(guiName)
+        if offerGui then
+            offerGui:Destroy()
+        end
+    end)
+    track(npcShopperConn)
+end
+
 local autoFavoriteSafeThread = nil
 local function startAutoFavoriteSafe()
     if autoFavoriteSafeThread then pcall(task.cancel, autoFavoriteSafeThread) end
@@ -3225,6 +3337,16 @@ end, "AutoContainerFarm")
 dropdown("Auctions", DiscoveredContainers,
 function(c) return State.SelectedContainers[c] end,
 function(c, v) State.SelectedContainers[c] = v end)
+toggle("✦", "Auto Accept Offer", function(on)
+    State.AutoAcceptOffer = on
+    if on then
+        startAutoAcceptOffers()
+        State.status = "[Shop] Auto-accept OFFERS ON"
+    else
+        State.status = "Auto-accept OFF"
+    end
+end, "AutoAcceptOffer")
+numberInput("  Min Offer %", State.MinOfferPercent, function(v) State.MinOfferPercent = v end)
 toggle("✦", "Current Auction ESP", function(on)
     State.CurrentAuctionESP = on
     if not on then
@@ -3870,6 +3992,7 @@ startAntiAFK()
 State.myPlot = findMyPlot()
 rebuildPlacedItemsCache()
 startCurrentAuctionESPManager()
+startAutoAcceptOffers()
 
 MF.Size = UDim2.new(0,0,0,0)
 MF.Position = UDim2.new(0, 18, 0.5, 0)

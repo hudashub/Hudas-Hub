@@ -322,7 +322,7 @@ end
 -- ─── STATE ───────────────────────────────────────────────────────────
 State = {
     AutoContainerFarm = false,
-    CurrentAuctionESP = true,
+    CurrentAuctionESP = false,
     AutoCollectLost = false,
     AutoFavorite = false,
     AutoFavoritePrice = 50000,
@@ -369,6 +369,7 @@ State = {
     WalkSpeed   = 50,
     PickupScanDelay   = 0.4,   -- seconds between backup pickup scans
     itemsPicked       = 0,
+    AutoSpawnVehicle  = false,
     -- pickup filters (only pick items that pass every ENABLED filter)
     FilterPrice    = false,
     MinPrice       = 100,      -- pick only if value >= this (no upper limit)
@@ -503,15 +504,13 @@ local function findActiveAuctionGarage()
     if not garages or not rootPart then return nil end
     
     local closestGarage = nil
-    local minDistance = 60
+    local minDistance = 120
     for _, g in ipairs(garages:GetChildren()) do
-        local base = g:FindFirstChild("Base") or g:FindFirstChild("Floorspace")
-        if base then
-            local dist = (base.Position - rootPart.Position).Magnitude
-            if dist < minDistance then
-                minDistance = dist
-                closestGarage = g
-            end
+        local pos = g:GetPivot().Position
+        local dist = (pos - rootPart.Position).Magnitude
+        if dist < minDistance then
+            minDistance = dist
+            closestGarage = g
         end
     end
     return closestGarage
@@ -1026,9 +1025,13 @@ local function tryGrab(prompt)
     if not prompt.Enabled then return false end
     local model = carryableModelOf(prompt)
     if not isMine(model) then return false end  -- only your own items
-    -- Filters apply to loose items you actually load. Boxes (OpenBoxPrompt) are always
-    -- opened first; the item they drop is then filtered on the next pass.
-    if prompt.Name == "PickupPrompt" and not passesFilters(model) then return false end
+    if prompt.Name == "PickupPrompt" then
+        if not passesFilters(model) then return false end
+        if isVehicleFar() then
+            spawnVehicleSafe()
+        end
+    end
+    
     local now = os.clock()
     if lastFired[prompt] and (now - lastFired[prompt]) < 0.4 then return false end
     lastFired[prompt] = now
@@ -1375,35 +1378,25 @@ local function getClosestContainer()
 end
 
 local function getMyVehicle()
+    local myId = tostring(player.UserId)
     for _, m in ipairs(WS:GetChildren()) do
-        if m:GetAttribute("VehicleGUID") and m:GetAttribute("OwnerUserId") == player.UserId then
+        if m:GetAttribute("VehicleGUID") and tostring(m:GetAttribute("OwnerUserId")) == myId then
             return m
         end
     end
     return nil
 end
 
-local function isVehicleFarNotificationActive()
-    local toastsGui = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("ToastsGui")
-    local container = toastsGui and toastsGui:FindFirstChild("ToastContainer")
-    if container then
-        for _, child in ipairs(container:GetChildren()) do
-            for _, desc in ipairs(child:GetDescendants()) do
-                if desc:IsA("TextLabel") then
-                    local text = desc.Text:lower()
-                    if text:find("too far") or text:find("far away") or text:find("distance") then
-                        return true
-                    end
-                end
-            end
-        end
-    end
-    return false
+local function isVehicleFar()
+    local veh = getMyVehicle()
+    if not veh then return true end
+    if not rootPart then return false end
+    return (veh:GetPivot().Position - rootPart.Position).Magnitude > 180
 end
 
 local VEHICLE_TIERS = {
+    ["flatbed"] = 11,      -- Prioritize Flatbed above all
     ["heavyweight"] = 10,
-    ["flatbed"] = 9,
     ["p-682"] = 8,
     ["kei truck"] = 5,
     ["rusty truck"] = 4,
@@ -1418,13 +1411,18 @@ local RARITY_TIERS = {
     ["common"] = 1
 }
 
-local function getBestOwnedVehicleName()
-    local ok, owned = pcall(function() return R.GetOwnedVehicles:InvokeServer() end)
-    if not ok or not owned or type(owned.vehicles) ~= "table" then
-        return nil
+local cachedBestVehicleGuid = nil
+local function getBestOwnedVehicleGuid()
+    if cachedBestVehicleGuid then
+        return cachedBestVehicleGuid
     end
     
-    local bestName = nil
+    local ok, owned = pcall(function() return R.GetOwnedVehicles:InvokeServer() end)
+    if not ok or not owned or type(owned.vehicles) ~= "table" then
+        return "STARTER-DUSTER"
+    end
+    
+    local bestGuid = "STARTER-DUSTER"
     local bestScore = -1
     
     for guid, info in pairs(owned.vehicles) do
@@ -1437,17 +1435,105 @@ local function getBestOwnedVehicleName()
             end
             if score > bestScore then
                 bestScore = score
-                bestName = name
+                bestGuid = guid
             end
         end
     end
-    return bestName or "Duster"
+    
+    cachedBestVehicleGuid = bestGuid
+    return bestGuid
 end
 
 local function spawnMyBestVehicle()
-    local bestName = getBestOwnedVehicleName()
-    if bestName then
-        pcall(function() R.RequestSpawn:FireServer(bestName) end)
+    local bestGuid = getBestOwnedVehicleGuid()
+    if bestGuid then
+        pcall(function() R.RequestSpawn:FireServer(bestGuid) end)
+    end
+end
+
+local function findClosestGarage()
+    local debris = WS:FindFirstChild("_Debris")
+    local garages = debris and debris:FindFirstChild("Garages")
+    if not garages or not rootPart then return nil end
+    
+    local closest = nil
+    local minDist = 120
+    for _, g in ipairs(garages:GetChildren()) do
+        local pos = g:GetPivot().Position
+        local dist = (pos - rootPart.Position).Magnitude
+        if dist < minDist then
+            minDist = dist
+            closest = g
+        end
+    end
+    return closest
+end
+
+local function spawnVehicleSafe(garageModel)
+    if not State.AutoSpawnVehicle then return end
+    local bestGuid = getBestOwnedVehicleGuid()
+    if not bestGuid or not rootPart then return end
+    
+    State.SpawningVehicle = true
+    State.status = "🏪 Spawning best owned vehicle..."
+    local hum = character and character:FindFirstChildOfClass("Humanoid")
+    if hum and (hum.SeatPart or hum.Sit) then
+        pcall(function() hum.Sit = false; hum.Jump = true end)
+        task.wait(0.1)
+    end
+    
+    local originalCF = rootPart.CFrame
+    local garage = garageModel or findClosestGarage()
+    local pad = garage and garage:FindFirstChild("EntrySquare", true)
+    local promptPart = pad and (pad:FindFirstChild("PromptPart") or pad:FindFirstChildWhichIsA("BasePart") or pad)
+    
+    local spawnCFrame
+    if promptPart and promptPart:IsA("BasePart") then
+        local centerPart = garage:FindFirstChild("Floorspace") or garage:FindFirstChild("Base")
+        local centerPos = centerPart and centerPart.Position or garage:GetPivot().Position
+        local padPos = promptPart.Position
+        local dir = (padPos - centerPos)
+        dir = Vector3.new(dir.X, 0, dir.Z).Unit
+        
+        -- Spawn 25 studs forward from the bidding pad (into the road/driveway behind the bidders)
+        local spawnPos = padPos + dir * 25 + Vector3.new(0, 1.5, 0)
+        -- Perpendicular vector for sideways rotation (East/West relative to container)
+        local sideDir = Vector3.new(-dir.Z, 0, dir.X).Unit
+        spawnCFrame = CFrame.new(spawnPos, spawnPos + sideDir)
+    else
+        spawnCFrame = originalCF * CFrame.new(0, 0, 10) -- 10 studs behind us
+    end
+    
+    -- Teleport 12 studs directly above the spawn spot to bypass collisions/doors
+    rootPart.CFrame = spawnCFrame * CFrame.new(0, 12, 0)
+    task.wait(0.25)
+    
+    pcall(function() R.RequestSpawn:FireServer(bestGuid) end)
+    task.wait(0.8)
+    
+    if hum then
+        local ejectStart = os.clock()
+        while (hum.SeatPart or hum.Sit) and (os.clock() - ejectStart) < 2.5 do
+            hum.Sit = false
+            hum.Jump = true
+            local seat = hum.SeatPart
+            if seat then
+                local weld = seat:FindFirstChild("SeatWeld")
+                if weld then pcall(function() weld:Destroy() end) end
+            end
+            task.wait(0.05)
+        end
+    end
+    
+    rootPart.CFrame = originalCF
+    task.wait(0.2)
+    State.SpawningVehicle = false
+end
+
+local function ensureVehicleNearby(garageModel)
+    local veh = getMyVehicle()
+    if not veh or isVehicleFar() then
+        spawnVehicleSafe(garageModel)
     end
 end
 
@@ -1458,69 +1544,12 @@ local function collectAllMyCarryables(garageModel)
     local garagePos = garageModel:GetPivot().Position
     local startCollect = os.clock()
     
-    -- Check if vehicle is despawned or too far away
-    local veh = getMyVehicle()
-    if not veh or isVehicleFarNotificationActive() then
-        State.status = "🚛 Spawning best owned vehicle..."
-        local hum = character and character:FindFirstChildOfClass("Humanoid")
-        
-        -- Force exit seat if sitting
-        if hum and (hum.SeatPart or hum.Sit) then
-            local seatStart = os.clock()
-            while (hum.SeatPart or hum.Sit) and (os.clock() - seatStart) < 3 do
-                hum.Sit = false
-                hum.Jump = true
-                local seat = hum.SeatPart
-                if seat then
-                    local weld = seat:FindFirstChild("SeatWeld")
-                    if weld then pcall(function() weld:Destroy() end) end
-                end
-                task.wait(0.1)
-            end
-        end
-        
-        -- Find the prompt part
-        local prompt = garageModel:FindFirstChild("EnterAuction", true)
-        local promptPart = prompt and prompt.Parent
-        if promptPart and promptPart:IsA("BasePart") then
-            local pivotPos = garageModel:GetPivot().Position
-            local padPos = promptPart.Position
-            local dir = (padPos - pivotPos)
-            dir = Vector3.new(dir.X, 0, dir.Z).Unit
-            
-            local spawnPos = padPos + dir * 25 + Vector3.new(0, 2, 0)
-            local spawnCFrame = CFrame.new(spawnPos) * (promptPart.CFrame - promptPart.CFrame.Position)
-            
-            rootPart.CFrame = spawnCFrame
-            task.wait(0.25)
-            
-            -- Spawn the vehicle
-            spawnMyBestVehicle()
-            task.wait(0.8)
-            
-            -- Eject player from the seat right after spawning (just in case they got seated)
-            if hum then
-                local ejectStart = os.clock()
-                while (hum.SeatPart or hum.Sit) and (os.clock() - ejectStart) < 3 do
-                    hum.Sit = false
-                    hum.Jump = true
-                    local seat = hum.SeatPart
-                    if seat then
-                        local weld = seat:FindFirstChild("SeatWeld")
-                        if weld then pcall(function() weld:Destroy() end) end
-                    end
-                    task.wait(0.1)
-                end
-            end
-            
-            -- Teleport player back to the container door
-            rootPart.CFrame = promptPart.CFrame + Vector3.new(0, 2, 0)
-            task.wait(0.2)
-        end
-    end
+    -- Ensure vehicle is spawned outside (25 studs away from active auction)
+    ensureVehicleNearby(garageModel)
     
     -- Loop until no owned carryables are left within 80 studs, or timeout (15s)
     while os.clock() - startCollect < 15 and State.AutoContainerFarm do
+        ensureVehicleNearby(garageModel)
         local targets = {}
         for _, item in ipairs(carry:GetChildren()) do
             if isMine(item) then
@@ -1560,6 +1589,7 @@ local function collectAllMyCarryables(garageModel)
         for _, target in ipairs(targets) do
             if not State.AutoContainerFarm then break end
             
+            while State.SpawningVehicle do task.wait(0.05) end
             State.status = "🤲 Teleporting to item: " .. target.item.Name
             rootPart.CFrame = CFrame.new(target.pos + Vector3.new(0, 1.5, 0))
             task.wait(0.15)
@@ -1575,6 +1605,13 @@ local function runContainerFarmLoop()
     if containerFarmThread then pcall(task.cancel, containerFarmThread) end
     containerFarmThread = task.spawn(function()
         while State.AutoContainerFarm do
+            -- Wait if active bidding is currently in progress
+            if State.inAuction then
+                State.status = "⏳ Active bidding in progress..."
+                task.wait(1.0)
+                continue
+            end
+
             -- Double check we are not sitting before searching or teleporting
             local hum = character and character:FindFirstChildOfClass("Humanoid")
             if hum and hum.SeatPart then
@@ -1604,6 +1641,7 @@ local function runContainerFarmLoop()
                 -- Teleport to the prompt part
                 State.status = "✈️ Teleporting to " .. target.model.Name
                 if rootPart then
+                    while State.SpawningVehicle do task.wait(0.05) end
                     rootPart.CFrame = target.part.CFrame + Vector3.new(0, 2, 0)
                 end
                 task.wait(0.5)
@@ -1733,6 +1771,7 @@ local function startAutoCollectLost()
                     if #targets > 0 then
                         for _, target in ipairs(targets) do
                             if not State.AutoCollectLost or State.AutoContainerFarm or State.inAuction then break end
+                            while State.SpawningVehicle do task.wait(0.05) end
                             State.status = "🔍 Collecting Lost: " .. target.item.Name
                             rootPart.CFrame = CFrame.new(target.pos + Vector3.new(0, 1.5, 0))
                             task.wait(0.25)
@@ -2141,17 +2180,15 @@ local function getLockpickableInventorySafes()
     local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
     if ok and type(inv) == "table" then
         for guid, entry in pairs(inv) do
-            if entry.Favorited ~= true then
-                local id = tostring(entry.ItemId or "")
-                local itemData = Items and Items[id]
-                if itemData and itemData.SafeId then
-                    table.insert(list, {
-                        guid = guid,
-                        name = itemData.Name,
-                        safeId = itemData.SafeId,
-                        entry = entry
-                    })
-                end
+            local id = tostring(entry.ItemId or "")
+            local itemData = Items and Items[id]
+            if itemData and itemData.SafeId then
+                table.insert(list, {
+                    guid = guid,
+                    name = itemData.Name,
+                    safeId = itemData.SafeId,
+                    entry = entry
+                })
             end
         end
     end
@@ -3161,6 +3198,18 @@ local function teleportDropdown(titleText, items, onSelect)
 end
 
 -- Build toggles
+section("TELEPORTS")
+teleportDropdown("Select Location to Teleport", {
+    "My Plot",
+    "Back Alley",
+    "Farmyard",
+    "Junk Yard",
+    "Shipyard",
+    "Shopping Mall"
+}, function(selectedName)
+    performTeleport(selectedName)
+end)
+
 section("AUTO-FARM")
 toggle("✦", "Auto Farm Loop", function(on)
     State.AutoContainerFarm = on
@@ -3195,6 +3244,10 @@ toggle("✦", "Auto Collect Lost Items", function(on)
         State.status = "Auto Collect Lost OFF"
     end
 end, "AutoCollectLost")
+toggle("✦", "Auto Spawn Vehicle", function(on)
+    State.AutoSpawnVehicle = on
+    State.status = on and "[Vehicle] Auto-spawn ON" or "[Vehicle] Auto-spawn OFF"
+end, "AutoSpawnVehicle")
 toggle("✦", "Auto Favorite Items", function(on)
     State.AutoFavorite = on
     if on then
@@ -3261,17 +3314,7 @@ dropdown("Safe Filters", DiscoveredSafes,
 function(s) return State.SelectedSafes[s] end,
 function(s, v) State.SelectedSafes[s] = v end)
 
-section("TELEPORTS")
-teleportDropdown("Select Location to Teleport", {
-    "My Plot",
-    "Back Alley",
-    "Farmyard",
-    "Junk Yard",
-    "Shipyard",
-    "Shopping Mall"
-}, function(selectedName)
-    performTeleport(selectedName)
-end)
+
 
 section("AUCTION")
 toggle("✦","Auto Start Auction",function(on)

@@ -32,7 +32,7 @@ end
 local player    = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local rootPart  = character:WaitForChild("HumanoidRootPart")
-local State, hasPendingPriorities
+local State, hasPendingPriorities, resolveItemInfo
 local Items, MutatorMod, Grading
 pcall(function() Items      = require(RS.Modules.Items) end)
 pcall(function() MutatorMod = require(RS.Modules.MutatorModule) end)
@@ -136,6 +136,49 @@ local function discoverAllGarages()
 end
 
 local DiscoveredContainers = discoverAllGarages()
+
+local DiscoveredEnergyDrinks = {}
+local DrinkNameToId = {}
+pcall(function()
+    local catalog = game.ReplicatedStorage.Events.EnergyShop.GetCatalog:InvokeServer()
+    if catalog and catalog.Drinks then
+        for _, d in ipairs(catalog.Drinks) do
+            table.insert(DiscoveredEnergyDrinks, d.Name)
+            DrinkNameToId[d.Name] = tostring(d.EnergyDrinkId)
+        end
+    end
+end)
+if #DiscoveredEnergyDrinks == 0 then
+    DiscoveredEnergyDrinks = { "Luck Drink 1", "Luck Drink 2", "Luck Drink 3" }
+    DrinkNameToId = {
+        ["Luck Drink 1"] = "1",
+        ["Luck Drink 2"] = "2",
+        ["Luck Drink 3"] = "3"
+    }
+end
+
+local currentPawnRate = 0.5
+local PlacedItems = {}
+local function rebuildPlacedItemsCache()
+    local plot = State.myPlot or findMyPlot()
+    if not plot then return end
+    local currentGuids = {}
+    for _, v in ipairs(plot:GetDescendants()) do
+        local guid = v:GetAttribute("GUID")
+        if guid then
+            currentGuids[guid] = true
+            if not PlacedItems[guid] then
+                local price = tonumber(v:GetAttribute("StockPrice")) or 0
+                PlacedItems[guid] = price
+            end
+        end
+    end
+    for guid in pairs(PlacedItems) do
+        if not currentGuids[guid] then
+            PlacedItems[guid] = nil
+        end
+    end
+end
 
 local function getAllMutations()
     local list = { "All" }
@@ -279,6 +322,7 @@ end
 -- ─── STATE ───────────────────────────────────────────────────────────
 State = {
     AutoContainerFarm = false,
+    CurrentAuctionESP = true,
     AutoCollectLost = false,
     AutoFavorite = false,
     AutoFavoritePrice = 50000,
@@ -299,6 +343,8 @@ State = {
     AutoCleanHighest = false,
     AutoGradeHighest = false,
     AutoLocksmith = false,
+    AutoBuyEnergyDrink = false,
+    SelectedEnergyDrinks = {},
     AutoLockpickSafe = false,
     SelectedSafes = {},
     AutoFavoriteSafe = false,
@@ -370,6 +416,233 @@ end
 
 -- ─── AUTO BID WIN ─────────────────────────────────────────────────────
 -- Live signature (verified via remote spy): UpdateCurrentWinningBid(currentBid, winnerName, bidderChar, nextBidPrice, garageModel)
+local activeAuctionBillboard = nil
+local scanningThread = nil
+
+local function removeAuctionBillboard()
+    if scanningThread then
+        pcall(task.cancel, scanningThread)
+        scanningThread = nil
+    end
+    if activeAuctionBillboard then
+        pcall(function() activeAuctionBillboard:Destroy() end)
+        activeAuctionBillboard = nil
+    end
+end
+
+local ExpectedValues = {
+    -- Cardboard Boxes / Crates
+    ["Small Box"] = 50,
+    ["Medium Box"] = 120,
+    ["Large Box"] = 250,
+    ["Stereofoam Crate"] = 180,
+    
+    -- Safes / Locksmith containers
+    ["Junk Safe"] = 80,
+    ["Wooden Safe"] = 150,
+    ["Metal Safe"] = 450,
+    ["Code Safe"] = 900,
+    ["Diamond Safe"] = 1800,
+    ["Diamond Vault"] = 3500,
+}
+
+local function getContainerValuation(garageModel)
+    if not garageModel then return 0, 0 end
+    local totalVal = 0
+    local itemCount = 0
+    
+    local function scanFolder(folder)
+        if not folder then return end
+        for _, item in ipairs(folder:GetChildren()) do
+            if item:IsA("Model") and item.Name ~= "Button" and item.Name ~= "Door" and item.Name ~= "Auctioneer" and item.Name ~= "Sal" and item.Name ~= "Dwayne" and item.Name ~= "Floyd" and item.Name ~= "Connie" and item.Name ~= "Rosa" then
+                local info = resolveItemInfo(item)
+                if info and info.price and info.price > 0 then
+                    totalVal = totalVal + info.price
+                    itemCount = itemCount + 1
+                else
+                    local itemId = item:GetAttribute("ItemId")
+                    local data = nil
+                    if itemId then
+                        data = Items[tostring(itemId)]
+                    else
+                        for id, entry in pairs(Items) do
+                            if entry.Name == item.Name then
+                                data = entry
+                                break
+                            end
+                        end
+                    end
+                    if data and data.BasePrice then
+                        totalVal = totalVal + data.BasePrice
+                        itemCount = itemCount + 1
+                    else
+                        local expectedPrice = ExpectedValues[item.Name]
+                        if expectedPrice then
+                            totalVal = totalVal + expectedPrice
+                            itemCount = itemCount + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    scanFolder(garageModel:FindFirstChild("Parts"))
+    scanFolder(garageModel:FindFirstChild("Floorspace"))
+    
+    return totalVal, itemCount
+end
+
+local function findActiveAuctionGarage()
+    local debris = WS:FindFirstChild("_Debris")
+    local garages = debris and debris:FindFirstChild("Garages")
+    if not garages or not rootPart then return nil end
+    
+    local closestGarage = nil
+    local minDistance = 60
+    for _, g in ipairs(garages:GetChildren()) do
+        local base = g:FindFirstChild("Base") or g:FindFirstChild("Floorspace")
+        if base then
+            local dist = (base.Position - rootPart.Position).Magnitude
+            if dist < minDistance then
+                minDistance = dist
+                closestGarage = g
+            end
+        end
+    end
+    return closestGarage
+end
+
+local function scanAndRenderAuctionESP(garageModel)
+    removeAuctionBillboard()
+    if not State.CurrentAuctionESP then return end
+    
+    garageModel = garageModel or findActiveAuctionGarage()
+    if not garageModel then return end
+    
+    local attachPart = garageModel:FindFirstChild("PromptPart", true) or garageModel:FindFirstChild("Base")
+    if not attachPart then return end
+    
+    if typeof(attachPart) == "Vector3" then
+        for _, p in ipairs(garageModel:GetDescendants()) do
+            if p:IsA("BasePart") then
+                attachPart = p
+                break
+            end
+        end
+    end
+    if typeof(attachPart) ~= "Instance" or not attachPart:IsA("BasePart") then return end
+    
+    local bg = Instance.new("BillboardGui")
+    bg.Name = "SH_AuctionESP"
+    bg.Size = UDim2.new(0, 160, 0, 75)
+    bg.StudsOffset = Vector3.new(0, 4.5, 0)
+    bg.AlwaysOnTop = true
+    bg.Adornee = attachPart
+    bg.Parent = player:WaitForChild("PlayerGui")
+    
+    local frame = Instance.new("Frame", bg)
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    frame.BackgroundTransparency = 0.2
+    frame.BorderSizePixel = 0
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    
+    local stroke = Instance.new("UIStroke", frame)
+    stroke.Color = Color3.fromRGB(220, 20, 20)
+    stroke.Thickness = 1.5
+    stroke.Transparency = 0.2
+    
+    local title = Instance.new("TextLabel", frame)
+    title.Size = UDim2.new(1, 0, 0, 18)
+    title.Position = UDim2.new(0, 0, 0, 4)
+    title.BackgroundTransparency = 1
+    title.Text = "AUCTION SCANNED"
+    title.TextColor3 = Color3.fromRGB(220, 20, 20)
+    title.TextSize = 9
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Center
+    
+    local valueText = Instance.new("TextLabel", frame)
+    valueText.Size = UDim2.new(1, 0, 0, 24)
+    valueText.Position = UDim2.new(0, 0, 0, 22)
+    valueText.BackgroundTransparency = 1
+    valueText.Text = "Scanning..."
+    valueText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    valueText.TextSize = 18
+    valueText.Font = Enum.Font.GothamBold
+    valueText.TextXAlignment = Enum.TextXAlignment.Center
+    
+    local subText = Instance.new("TextLabel", frame)
+    subText.Size = UDim2.new(1, 0, 0, 22)
+    subText.Position = UDim2.new(0, 0, 0, 46)
+    subText.BackgroundTransparency = 1
+    subText.Text = "Retrieving items..."
+    subText.TextColor3 = Color3.fromRGB(150, 150, 150)
+    subText.TextSize = 9
+    subText.Font = Enum.Font.GothamSemibold
+    subText.TextXAlignment = Enum.TextXAlignment.Center
+    
+    activeAuctionBillboard = bg
+    
+    scanningThread = task.spawn(function()
+        local startScan = os.clock()
+        local lastItemCount = -1
+        
+        while os.clock() - startScan < 3.5 do
+            local totalVal, itemCount = getContainerValuation(garageModel)
+            if itemCount > 0 and itemCount ~= lastItemCount then
+                lastItemCount = itemCount
+                local maxBidVal = math.floor(totalVal * 0.75)
+                valueText.Text = "$" .. fmt(totalVal)
+                subText.Text = tostring(itemCount) .. " items | Max Bid: $" .. fmt(maxBidVal)
+                State.status = "🔍 Scanned Container | Est: $" .. fmt(totalVal) .. " | Max Bid: $" .. fmt(maxBidVal)
+            end
+            task.wait(0.25)
+        end
+    end)
+end
+
+local espVisConn = nil
+local function startCurrentAuctionESPManager()
+    if espVisConn then espVisConn:Disconnect() end
+    
+    local uiControllerGui = player:WaitForChild("PlayerGui"):WaitForChild("UIControllerGui")
+    local biddingContainer = uiControllerGui:WaitForChild("AuctionBiddingContainer")
+    
+    local function onVisible(open)
+        State.inAuction = open
+        if open then
+            State.currentBid = 0
+            State.status = "🏪 Auction open — bidding!"
+            local g = findActiveAuctionGarage()
+            if g then
+                State.currentGarage = g
+                scanAndRenderAuctionESP(g)
+            end
+        else
+            removeAuctionBillboard()
+            if State.currentBid > 0 then
+                State.bidsWon = State.bidsWon + 1
+                State.status = "🏆 Won! (" .. State.bidsWon .. " total)"
+            else
+                State.status = "Auction ended"
+            end
+            State.currentBid = 0
+            State.currentGarage = nil
+        end
+    end
+    
+    espVisConn = biddingContainer:GetPropertyChangedSignal("Visible"):Connect(function()
+        onVisible(biddingContainer.Visible)
+    end)
+    track(espVisConn)
+    
+    if biddingContainer.Visible then
+        onVisible(true)
+    end
+end
+
 local bidConn, auctionOpenConn
 local function startAutoBid()
     if bidConn then bidConn:Disconnect() end
@@ -412,10 +685,7 @@ local function startAutoBid()
         if open then
             State.currentBid = 0
             State.status = "🏪 Auction open — bidding!"
-            -- Skip the blind $1 opening bid when the price filter is on — wait until the
-            -- current bid climbs to the threshold (handled in UpdateWinBid above).
             if State.AutoBidWin and not State.AutoBidFilterPrice then
-                -- Place an opening bid immediately
                 task.delay(0.6, function()
                     if State.inAuction and State.AutoBidWin then
                         pcall(function() R.BidRemote:FireServer(1) end)
@@ -505,7 +775,9 @@ local function sellFromDraggingInventory()
                 price = tonumber(itemData.StockPrice or itemData.Price or 0) or 0
             end
             State.itemsSold = State.itemsSold + 1
-            State.earnings = State.earnings + price
+            local baseVal = shelfPrice(tostring(itemData.ItemId), itemData)
+            local profit = baseVal * (currentPawnRate - 1)
+            State.earnings = State.earnings + profit
             count = count + 1
             task.wait(State.SellDelay)
         end
@@ -529,7 +801,8 @@ local function sellFromPlot()
             local price = tonumber(v:GetAttribute("StockPrice")) or 0
             pcall(function() R.SellItemRemote:FireServer(guid) end)
             State.itemsSold = State.itemsSold + 1
-            State.earnings = State.earnings + price
+            local profit = price * (currentPawnRate - 1)
+            State.earnings = State.earnings + profit
             count = count + 1
             task.wait(State.SellDelay)
         end
@@ -688,7 +961,7 @@ end
 --   Items[ItemId]   -> BasePrice + Rarity
 --   MutatorModule:CalculatePriceForEntry(BasePrice, entry)  -> live value (w/ mutators+condition)
 
-local function resolveItemInfo(model)
+resolveItemInfo = function(model)
     if not model or not Items or not MutatorMod then return nil end
     local ok, entry = pcall(function() return MutatorMod:BuildEntryFromAttributes(model) end)
     if not ok or type(entry) ~= "table" then return nil end
@@ -894,7 +1167,11 @@ local function placeOnSlot(slot, it)
             slot.shelf:GetAttribute("GUID"), slot.att.Name, false)
     end)
     if State.ShelfPlaceDelay > 0 then task.wait(State.ShelfPlaceDelay) end
-    return (player:GetAttribute("InventoryCount") or 0) < before
+    local success = (player:GetAttribute("InventoryCount") or 0) < before
+    if success then
+        PlacedItems[it.guid] = shelfPrice(it.id, it.entry)
+    end
+    return success
 end
 
 -- a slot is "big" (fits vehicles / large furniture) based on its shelf's name
@@ -1749,6 +2026,62 @@ local function startAutoLocksmith()
     trackThread(autoLocksmithThread)
 end
 
+local autoBuyEnergyDrinkThread = nil
+
+local function buyDrink(drinkId, price)
+    local currentDiamonds = player:GetAttribute("Diamonds") or 0
+    if currentDiamonds < price then return false, "Not enough diamonds" end
+    
+    local ok, res = pcall(function()
+        return game.ReplicatedStorage.Events.EnergyShop.BuyDrink:InvokeServer(tostring(drinkId))
+    end)
+    if ok and res and res.success then
+        return true
+    else
+        return false, res and res.error or "Unknown error"
+    end
+end
+
+local function startAutoBuyEnergyDrink()
+    if autoBuyEnergyDrinkThread then pcall(task.cancel, autoBuyEnergyDrinkThread) end
+    autoBuyEnergyDrinkThread = task.spawn(function()
+        while State.AutoBuyEnergyDrink do
+            local catalog = nil
+            pcall(function()
+                catalog = game.ReplicatedStorage.Events.EnergyShop.GetCatalog:InvokeServer()
+            end)
+            
+            if catalog and catalog.Drinks then
+                for _, drink in ipairs(catalog.Drinks) do
+                    if not State.AutoBuyEnergyDrink then break end
+                    
+                    local name = drink.Name
+                    local id = DrinkNameToId[name] or tostring(drink.EnergyDrinkId)
+                    local price = drink.DiamondPrice or 0
+                    local stock = drink.StockRemaining or 0
+                    
+                    if State.SelectedEnergyDrinks[name] and stock > 0 then
+                        local currentDiamonds = player:GetAttribute("Diamonds") or 0
+                        if currentDiamonds >= price then
+                            State.status = "[Shop] Buying " .. name .. "..."
+                            local success, err = buyDrink(id, price)
+                            if success then
+                                State.status = "[Shop] Bought " .. name
+                                task.wait(1.5)
+                            else
+                                State.status = "[Shop] Fail buy: " .. tostring(err)
+                                task.wait(1.0)
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(8)
+        end
+    end)
+    trackThread(autoBuyEnergyDrinkThread)
+end
+
 local function getAllSafes()
     local list = {}
     local seen = {}
@@ -2155,9 +2488,12 @@ local function startSellInventory()
             local ok, items = pcall(function() return R.GetSellableItems:InvokeServer() end)
             if ok and type(items) == "table" then
                 local guids = {}
+                local totalBaseVal = 0
                 for guid, entry in pairs(items) do
                     if entry.Favorited ~= true then
                         table.insert(guids, guid)
+                        local baseVal = shelfPrice(tostring(entry.ItemId), entry)
+                        totalBaseVal = totalBaseVal + baseVal
                     end
                 end
                 
@@ -2168,8 +2504,9 @@ local function startSellInventory()
                         if result.success then
                             local soldCount = result.sold or 0
                             local earned = result.totalEarned or 0
+                            local profit = earned - totalBaseVal
                             State.itemsSold = State.itemsSold + soldCount
-                            State.earnings = State.earnings + earned
+                            State.earnings = State.earnings + profit
                             State.status = "💰 Sold " .. soldCount .. " items | Total: $" .. fmt(earned)
                         else
                             State.status = "⚠️ " .. (result.error or "Sale rejected")
@@ -2338,7 +2675,7 @@ local function hdBtn(txt, xOff, bg)
     Instance.new("UICorner",b).CornerRadius = UDim.new(1,0)
     return b
 end
-local CloseBtn = hdBtn("X",-30,Color3.fromRGB(20,20,20))
+local CloseBtn = hdBtn("×",-30,Color3.fromRGB(20,20,20))
 CloseBtn.TextColor3 = Color3.fromRGB(220,20,20)
 local MinBtn   = hdBtn("-",-56,Color3.fromRGB(20,20,20))
 MinBtn.TextColor3 = Color3.fromRGB(180,180,180)
@@ -2812,6 +3149,16 @@ end, "AutoContainerFarm")
 dropdown("Auctions", DiscoveredContainers,
 function(c) return State.SelectedContainers[c] end,
 function(c, v) State.SelectedContainers[c] = v end)
+toggle("✦", "Current Auction ESP", function(on)
+    State.CurrentAuctionESP = on
+    if not on then
+        removeAuctionBillboard()
+    else
+        if State.inAuction and State.currentGarage then
+            scanAndRenderAuctionESP(State.currentGarage)
+        end
+    end
+end, "CurrentAuctionESP")
 toggle("✦", "Auto Collect Lost Items", function(on)
     State.AutoCollectLost = on
     if on then
@@ -2998,6 +3345,20 @@ toggle("✦","Auto Locksmith",function(on)
         State.status = "Auto-locksmith OFF"
     end
 end, "AutoLocksmith")
+
+toggle("✦","Auto Buy Energy Drink",function(on)
+    State.AutoBuyEnergyDrink = on
+    if on then startAutoBuyEnergyDrink(); State.status = "[Shop] Auto-buy Energy Drink ON"
+    else
+        if autoBuyEnergyDrinkThread then pcall(task.cancel, autoBuyEnergyDrinkThread) end
+        State.status = "Auto-buy Energy Drink OFF"
+    end
+end, "AutoBuyEnergyDrink")
+
+dropdown("Energy Drinks", DiscoveredEnergyDrinks,
+    function(it) return State.SelectedEnergyDrinks[it] == true end,
+    function(it,val) State.SelectedEnergyDrinks[it] = val end,
+    "SelectedEnergyDrinks")
 
 -- ─── PICKUP FILTERS ─────────────────────────────────────────────────
 -- Each filter only matters when its toggle is ON. An item is picked only if it
@@ -3340,8 +3701,36 @@ track(player:GetAttributeChangedSignal("LifetimeNPCSales"):Connect(function()
         local diffCash = currentCash - lastCash
         
         if diffSales > 0 then
+            rebuildPlacedItemsCache()
+            local plot = State.myPlot or findMyPlot()
+            local currentGuids = {}
+            if plot then
+                for _, v in ipairs(plot:GetDescendants()) do
+                    local guid = v:GetAttribute("GUID")
+                    if guid then currentGuids[guid] = true end
+                end
+            end
+            
+            local soldBaseValue = 0
+            local soldCount = 0
+            for guid, basePrice in pairs(PlacedItems) do
+                if not currentGuids[guid] then
+                    soldBaseValue = soldBaseValue + basePrice
+                    PlacedItems[guid] = nil
+                    soldCount = soldCount + 1
+                    if soldCount >= diffSales then break end
+                end
+            end
+            
+            if soldCount < diffSales then
+                local missing = diffSales - soldCount
+                local avgDiff = diffCash / diffSales
+                soldBaseValue = soldBaseValue + (avgDiff * 0.77) * missing
+            end
+            
+            local profit = diffCash - soldBaseValue
             if diffCash > 0 then
-                State.earnings = State.earnings + diffCash
+                State.earnings = State.earnings + profit
                 State.itemsSold = State.itemsSold + diffSales
             else
                 State.itemsSold = State.itemsSold + diffSales
@@ -3379,6 +3768,7 @@ task.spawn(function()
     pcall(function()
         local state = R.GetPawnState:InvokeServer()
         if state and state.rate then
+            currentPawnRate = state.rate
             updateQuickSellRate(state.rate)
         end
     end)
@@ -3386,6 +3776,7 @@ end)
 
 track(R.RateChanged.OnClientEvent:Connect(function(data)
     if data and data.rate then
+        currentPawnRate = data.rate
         updateQuickSellRate(data.rate)
     end
 end))
@@ -3393,6 +3784,8 @@ end))
 -- Init
 startAntiAFK()
 State.myPlot = findMyPlot()
+rebuildPlacedItemsCache()
+startCurrentAuctionESPManager()
 
 MF.Size = UDim2.new(0,0,0,0)
 MF.Position = UDim2.new(0, 18, 0.5, 0)

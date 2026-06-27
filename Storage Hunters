@@ -2003,12 +2003,12 @@ local function findHighestValueLockableItem()
     local highestPrice = -1
     
     for _, item in ipairs(res.items) do
-        if item.data and item.data.Favorited ~= true then
+        if item.data then
             local price = getLockableItemPrice(item)
             local id = tostring(item.data.ItemId or "")
             local itemName = Items and Items[id] and Items[id].Name or ""
             
-            if string.find(itemName:lower(), "diamond") and string.find(itemName:lower(), "safe") then
+            if string.find(itemName:lower(), "diamond") and (string.find(itemName:lower(), "safe") or string.find(itemName:lower(), "vault")) then
                 if price > diamondPrice then
                     diamondPrice = price
                     diamondItem = item
@@ -2157,8 +2157,10 @@ end
 
 local DiscoveredSafes = getAllSafes()
 
+local cachedBestLockpick = nil
 local function ensureBestLockpickEquipped()
-    local ok, res = pcall(function() return R.BuyLockpick:InvokeServer("Picklock1") end)
+    local queryName = cachedBestLockpick or "Picklock1"
+    local ok, res = pcall(function() return R.BuyLockpick:InvokeServer(queryName) end)
     if ok and res and type(res) == "table" and res.owned then
         local best = nil
         for i = 4, 1, -1 do
@@ -2169,12 +2171,13 @@ local function ensureBestLockpickEquipped()
             end
         end
         best = best or "Picklock1"
+        cachedBestLockpick = best
         if res.equipped ~= best then
             pcall(function() R.BuyLockpick:InvokeServer(best) end)
         end
         return best
     end
-    return "Picklock1"
+    return cachedBestLockpick or "Picklock1"
 end
 
 local function getLockpickableInventorySafes()

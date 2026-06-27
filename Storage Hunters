@@ -292,30 +292,146 @@ local TeleportLocations = {
     ["Shopping Mall"] = Vector3.new(308.09, 1720.39, -268.12)
 }
 
+local function findNPCInArea(areaName)
+    local areas = WS:FindFirstChild("Areas")
+    local folder = areas and areas:FindFirstChild(areaName)
+    if folder then
+        for _, desc in ipairs(folder:GetDescendants()) do
+            if desc:IsA("Humanoid") and desc.Parent:IsA("Model") and desc.Parent ~= player.Character then
+                return desc.Parent
+            end
+        end
+    end
+    return nil
+end
+
+local function getAreaCenter(areaName)
+    local areas = WS:FindFirstChild("Areas")
+    local folder = areas and areas:FindFirstChild(areaName)
+    if not folder then return nil end
+    
+    local boundary = folder:FindFirstChild("AreaBoundary")
+    if boundary and boundary:IsA("BasePart") then
+        return boundary.Position
+    end
+    
+    local totalPos = Vector3.new(0,0,0)
+    local count = 0
+    for _, desc in ipairs(folder:GetDescendants()) do
+        if desc:IsA("BasePart") then
+            totalPos = totalPos + desc.Position
+            count = count + 1
+        end
+    end
+    if count > 0 then
+        return totalPos / count
+    end
+    return nil
+end
+
+local function getClosestGarageTo(position)
+    local debris = WS:FindFirstChild("_Debris")
+    local garages = debris and debris:FindFirstChild("Garages")
+    if not garages then return nil end
+    
+    local closest = nil
+    local minDist = math.huge
+    for _, g in ipairs(garages:GetChildren()) do
+        local pos = g:GetPivot().Position
+        local dist = (pos - position).Magnitude
+        if dist < minDist then
+            minDist = dist
+            closest = g
+        end
+    end
+    return closest
+end
+
+local function getTeleportLocationsList()
+    local list = { "My Plot" }
+    local areas = WS:FindFirstChild("Areas")
+    if areas then
+        local found = {}
+        for _, child in ipairs(areas:GetChildren()) do
+            found[child.Name] = true
+        end
+        local sorted = {}
+        for name in pairs(found) do
+            table.insert(sorted, name)
+        end
+        table.sort(sorted)
+        for _, name in ipairs(sorted) do
+            table.insert(list, name)
+        end
+    else
+        local defaults = { "Back Alley", "Farmyard", "Junk Yard", "Shipyard", "Shopping Mall" }
+        for _, name in ipairs(defaults) do
+            table.insert(list, name)
+        end
+    end
+    return list
+end
+
 local function performTeleport(placeName)
     if not rootPart then
         State.status = "⚠️ Character RootPart not found"
         return
     end
     
-    local pos = TeleportLocations[placeName]
+    local targetCF = nil
+    
     if placeName == "My Plot" then
         local plot = State.myPlot or findMyPlot()
         if plot then
             local base = plot:FindFirstChild("Base")
-            local floor = base and (base:IsA("BasePart") and base or base:FindFirstChild("Floor") or base:FindFirstChildWhichIsA("BasePart", true)) or plot:FindFirstChildWhichIsA("BasePart", true)
-            pos = floor and floor.Position or plot:GetPivot().Position
+            local floor = base and base:FindFirstChild("Floor")
+            if floor then
+                -- Place character exactly 105 studs along the front Vector (facing the plot)
+                local standPos = (floor.CFrame * Vector3.new(0, 3, -105))
+                targetCF = CFrame.new(standPos, floor.Position)
+            else
+                local pivot = plot:GetPivot()
+                targetCF = CFrame.new(pivot.Position + Vector3.new(0, 3, -105), pivot.Position)
+            end
         else
-            State.status = "⚠️ My Plot not found in world"
+            State.status = "⚠️ My Plot not found"
             return
+        end
+    elseif placeName == "Shopping Mall" then
+        local pos = TeleportLocations["Shopping Mall"]
+        if pos then
+            targetCF = CFrame.new(pos + Vector3.new(0, 3, 0))
+        end
+    else
+        -- Search for NPC in the area first
+        local npc = findNPCInArea(placeName)
+        if npc then
+            local pivot = npc:GetPivot()
+            -- Teleport 6 studs in front of the NPC, facing them
+            local standPos = pivot.Position + pivot.LookVector * 6 + Vector3.new(0, 1, 0)
+            targetCF = CFrame.new(standPos, pivot.Position)
+        else
+            -- Fallback: find closest container to the area's center
+            local center = getAreaCenter(placeName)
+            local closestGarage = center and getClosestGarageTo(center)
+            if closestGarage then
+                local gPivot = closestGarage:GetPivot()
+                targetCF = CFrame.new(gPivot.Position + Vector3.new(0, 3, 0))
+            else
+                -- Ultimate fallback: hardcoded vector
+                local pos = TeleportLocations[placeName]
+                if pos then
+                    targetCF = CFrame.new(pos + Vector3.new(0, 3, 0))
+                end
+            end
         end
     end
     
-    if pos then
-        State.status = "✈️ Teleporting to " .. placeName
-        rootPart.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    if targetCF then
+        State.status = "✈️ Teleported to " .. placeName
+        rootPart.CFrame = targetCF
     else
-        State.status = "⚠️ Unknown place: " .. tostring(placeName)
+        State.status = "⚠️ Teleport failed for " .. tostring(placeName)
     end
 end
 
@@ -3314,14 +3430,7 @@ end
 
 -- Build toggles
 section("TELEPORTS")
-teleportDropdown("Select Location to Teleport", {
-    "My Plot",
-    "Back Alley",
-    "Farmyard",
-    "Junk Yard",
-    "Shipyard",
-    "Shopping Mall"
-}, function(selectedName)
+teleportDropdown("Select Location to Teleport", getTeleportLocationsList(), function(selectedName)
     performTeleport(selectedName)
 end)
 

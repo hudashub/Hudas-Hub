@@ -1140,6 +1140,7 @@ end
 local lastFired = setmetatable({}, { __mode = "k" })
 local function tryGrab(prompt)
     if not State.AutoPickup or not prompt or not GRAB_PROMPTS[prompt.Name] then return false end
+    if State.inAuction then return false end
     if not prompt.Enabled then return false end
     local model = carryableModelOf(prompt)
     if not isMine(model) then return false end  -- only your own items
@@ -1589,6 +1590,7 @@ end
 
 local function spawnVehicleSafe(garageModel)
     if not State.AutoSpawnVehicle then return end
+    if State.inAuction then return end
     local bestGuid = getBestOwnedVehicleGuid()
     if not bestGuid or not rootPart then return end
     
@@ -1771,7 +1773,7 @@ local function runContainerFarmLoop()
                 
                 -- Wait for auction to begin
                 local startWait = os.clock()
-                while not State.inAuction and (os.clock() - startWait) < 5 and State.AutoContainerFarm do
+                while not State.inAuction and (os.clock() - startWait) < 8 and State.AutoContainerFarm do
                     task.wait(0.2)
                 end
                 

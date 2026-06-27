@@ -350,6 +350,10 @@ State = {
     AutoFavoriteSafe = false,
     SelectedFavoriteSafes = {},
     SellInventory = false,
+    DynamicPawnSell = false,
+    MinPawnPercent = 5,
+    PawnSellFilterPrice = false,
+    PawnSellMaxPrice = 100,
     ShelfScanDelay  = 1.5,    -- seconds between auto-shelf scans
     ShelfPlaceDelay = 0.15,   -- small delay between placements (snappy, avoids rate-limit)
     ShelfFilterPrice = false, -- only shelve items BELOW ShelfMaxPrice (keep valuable ones)
@@ -513,6 +517,7 @@ local function findActiveAuctionGarage()
     return closestGarage
 end
 
+
 local function scanAndRenderAuctionESP(garageModel)
     removeAuctionBillboard()
     if not State.CurrentAuctionESP then return end
@@ -520,7 +525,8 @@ local function scanAndRenderAuctionESP(garageModel)
     garageModel = garageModel or findActiveAuctionGarage()
     if not garageModel then return end
     
-    local attachPart = garageModel:FindFirstChild("PromptPart", true) or garageModel:FindFirstChild("Base")
+    local pad = garageModel:FindFirstChild("EntrySquare", true)
+    local attachPart = pad and (pad:FindFirstChild("PromptPart") or pad:FindFirstChildWhichIsA("BasePart") or pad) or garageModel:FindFirstChild("PromptPart", true) or garageModel:FindFirstChild("Base")
     if not attachPart then return end
     
     if typeof(attachPart) == "Vector3" then
@@ -533,10 +539,13 @@ local function scanAndRenderAuctionESP(garageModel)
     end
     if typeof(attachPart) ~= "Instance" or not attachPart:IsA("BasePart") then return end
     
+    local isPad = pad and (attachPart == pad or attachPart.Parent == pad)
+    local heightOffset = isPad and 7.5 or 4.5
+    
     local bg = Instance.new("BillboardGui")
     bg.Name = "SH_AuctionESP"
-    bg.Size = UDim2.new(0, 160, 0, 75)
-    bg.StudsOffset = Vector3.new(0, 4.5, 0)
+    bg.Size = UDim2.new(0, 240, 0, 105)
+    bg.StudsOffset = Vector3.new(0, heightOffset, 0)
     bg.AlwaysOnTop = true
     bg.Adornee = attachPart
     bg.Parent = player:WaitForChild("PlayerGui")
@@ -544,42 +553,42 @@ local function scanAndRenderAuctionESP(garageModel)
     local frame = Instance.new("Frame", bg)
     frame.Size = UDim2.new(1, 0, 1, 0)
     frame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-    frame.BackgroundTransparency = 0.2
+    frame.BackgroundTransparency = 0.15
     frame.BorderSizePixel = 0
-    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
     
     local stroke = Instance.new("UIStroke", frame)
     stroke.Color = Color3.fromRGB(220, 20, 20)
-    stroke.Thickness = 1.5
+    stroke.Thickness = 2.0
     stroke.Transparency = 0.2
     
     local title = Instance.new("TextLabel", frame)
-    title.Size = UDim2.new(1, 0, 0, 18)
-    title.Position = UDim2.new(0, 0, 0, 4)
+    title.Size = UDim2.new(1, 0, 0, 20)
+    title.Position = UDim2.new(0, 0, 0, 8)
     title.BackgroundTransparency = 1
     title.Text = "AUCTION SCANNED"
     title.TextColor3 = Color3.fromRGB(220, 20, 20)
-    title.TextSize = 9
+    title.TextSize = 12
     title.Font = Enum.Font.GothamBold
     title.TextXAlignment = Enum.TextXAlignment.Center
     
     local valueText = Instance.new("TextLabel", frame)
-    valueText.Size = UDim2.new(1, 0, 0, 24)
-    valueText.Position = UDim2.new(0, 0, 0, 22)
+    valueText.Size = UDim2.new(1, 0, 0, 38)
+    valueText.Position = UDim2.new(0, 0, 0, 28)
     valueText.BackgroundTransparency = 1
     valueText.Text = "Scanning..."
     valueText.TextColor3 = Color3.fromRGB(255, 255, 255)
-    valueText.TextSize = 18
+    valueText.TextSize = 30
     valueText.Font = Enum.Font.GothamBold
     valueText.TextXAlignment = Enum.TextXAlignment.Center
     
     local subText = Instance.new("TextLabel", frame)
-    subText.Size = UDim2.new(1, 0, 0, 22)
-    subText.Position = UDim2.new(0, 0, 0, 46)
+    subText.Size = UDim2.new(1, 0, 0, 24)
+    subText.Position = UDim2.new(0, 0, 0, 68)
     subText.BackgroundTransparency = 1
     subText.Text = "Retrieving items..."
-    subText.TextColor3 = Color3.fromRGB(150, 150, 150)
-    subText.TextSize = 9
+    subText.TextColor3 = Color3.fromRGB(160, 160, 160)
+    subText.TextSize = 12
     subText.Font = Enum.Font.GothamSemibold
     subText.TextXAlignment = Enum.TextXAlignment.Center
     
@@ -824,7 +833,7 @@ end
 
 local sellThread
 local function startAutoSell()
-    if sellThread then task.cancel(sellThread) end
+    if sellThread then pcall(task.cancel, sellThread) end
     sellThread = task.spawn(function()
         while State.AutoSellInv do
             if hasPendingPriorities() then
@@ -1037,10 +1046,10 @@ local function scanNearbyPrompts()
         if not State.AutoPickup then break end
         if isMine(item) then  -- skip other players' items
             local base = item:FindFirstChild("Base") or item:FindFirstChildWhichIsA("BasePart")
-            -- find a grab-able prompt on this item
-            local prompt
-            for _, d in ipairs(item:GetDescendants()) do
-                if d:IsA("ProximityPrompt") and GRAB_PROMPTS[d.Name] then prompt = d break end
+            -- find a grab-able prompt on this item (much faster direct lookup)
+            local prompt = base and (base:FindFirstChild("PickupPrompt") or base:FindFirstChild("OpenBoxPrompt"))
+            if not prompt then
+                prompt = item:FindFirstChild("PickupPrompt") or item:FindFirstChild("OpenBoxPrompt")
             end
             if base and prompt then
                 local d = (base.Position - origin).Magnitude
@@ -1092,7 +1101,14 @@ R.PlaceStock   = PlotFolder:WaitForChild("PlaceStockItem")
 -- not the sellable inventory, so it's safe.
 local SKIP_SHELF_CAT = {}
 
+local cachedShelfSlots = nil
+local lastSlotRefresh = 0
+
 local function shelfSlots()
+    if cachedShelfSlots and os.clock() - lastSlotRefresh < 10 then
+        return cachedShelfSlots
+    end
+    
     local plot = State.myPlot or findMyPlot()
     State.myPlot = plot
     local out = {}
@@ -1106,6 +1122,8 @@ local function shelfSlots()
             end
         end
     end
+    cachedShelfSlots = out
+    lastSlotRefresh = os.clock()
     return out
 end
 
@@ -1188,41 +1206,39 @@ local function doShelfPass()
     pcall(function()
         local slots = shelfSlots()
         if #slots == 0 then return end
-        local sales = player:GetAttribute("LifetimeNPCSales") or 0
-        shelfSalesMark = shelfSalesMark or sales
-
-        -- a shelf item SOLD → a slot opened; forget learned occupancy and re-discover
-        if sales > shelfSalesMark then
-            shelfOccupied = {}
-            shelfFullLatch = false
-        end
-        shelfSalesMark = sales
-
-        if shelfFullLatch then
-            State.status = "🛒 Shelf full — waiting for a sale"
-            return
-        end
 
         local ok, inv = pcall(function() return R.GetPlayerInv:InvokeServer() end)
         if not ok or type(inv) ~= "table" then return end
         local items = shelfEligibleItems(inv)
         if #items == 0 then State.status = "🛒 Nothing to add"; return end
 
-        -- big items (vehicles / large furniture) only go on BIG slots; small items prefer
-        -- small slots so big slots stay open. Lightest items first.
+        -- Build real-time lookup map of occupied slots
+        local occupiedSlots = {}
+        local plot = State.myPlot or findMyPlot()
+        if plot then
+            for _, desc in ipairs(plot:GetDescendants()) do
+                local sguid = desc:GetAttribute("ShelfGUID")
+                local snapName = desc:GetAttribute("SnapPointName")
+                if sguid and snapName then
+                    occupiedSlots[sguid .. "_" .. snapName] = true
+                end
+            end
+        end
+
         local bigSlots, smallSlots = {}, {}
         for _, s in ipairs(slots) do
-            if slotIsBig(s) then bigSlots[#bigSlots + 1] = s else smallSlots[#smallSlots + 1] = s end
+            local k = s.shelf:GetAttribute("GUID") .. "_" .. s.att.Name
+            if not occupiedSlots[k] then
+                if slotIsBig(s) then bigSlots[#bigSlots + 1] = s else smallSlots[#smallSlots + 1] = s end
+            end
         end
+
         table.sort(items, function(a, b)
             local wa = (a.data and a.data.Weight) or 0
             local wb = (b.data and b.data.Weight) or 0
             if State.PrioritizeHeavy then return wa > wb else return wa < wb end
         end)
 
-        -- EMPIRICAL placement: try a slot; a drop in InventoryCount = it was free (now
-        -- filled), a rejection = occupied → remember it so we don't poke it again until a
-        -- sale re-opens discovery. Spam is capped per pass.
         local fails = 0
         for _, it in ipairs(items) do
             if not State.AutoShelf or fails >= SHELF_MAX_SPAM then break end
@@ -1235,31 +1251,29 @@ local function doShelfPass()
                 for _, s in ipairs(smallSlots) do candidates[#candidates + 1] = s end
                 for _, s in ipairs(bigSlots)   do candidates[#candidates + 1] = s end
             end
+            
             for _, slot in ipairs(candidates) do
                 if fails >= SHELF_MAX_SPAM then break end
-                local k = slotKeyOf(slot)
-                if not shelfOccupied[k] then
+                local k = slot.shelf:GetAttribute("GUID") .. "_" .. slot.att.Name
+                if not occupiedSlots[k] then
                     if placeOnSlot(slot, it) then
-                        shelfOccupied[k] = true        -- now filled
+                        occupiedSlots[k] = true
                         placed = placed + 1
                         State.status = "🛒 Shelved " .. placed .. " item(s)"
                         break
                     else
-                        shelfOccupied[k] = true        -- occupied / too small → skip till a sale
+                        occupiedSlots[k] = true
                         fails = fails + 1
                     end
                 end
             end
         end
 
-        -- every slot now known-occupied → idle until a sale frees one (stops the spam)
-        local allOcc = true
-        for _, s in ipairs(slots) do
-            if not shelfOccupied[slotKeyOf(s)] then allOcc = false break end
-        end
-        if allOcc then
-            shelfFullLatch = true
-            if placed == 0 then State.status = "🛒 Shelf full — waiting for a sale" end
+        local totalFree = #bigSlots + #smallSlots
+        if totalFree == 0 then
+            State.status = "🛒 Shelf full — waiting for a sale"
+        elseif placed == 0 then
+            State.status = "🛒 Auto-shelf IDLE"
         end
     end)
     shelfBusy = false
@@ -1270,23 +1284,17 @@ local shelfThread, shelfSalesConn
 local function startAutoShelf()
     if shelfThread then pcall(task.cancel, shelfThread) end
     if shelfSalesConn then shelfSalesConn:Disconnect() end
-    -- fresh start: forget all learned occupancy and re-discover from scratch.
-    -- Also clear shelfBusy in case the previous run was cancelled mid-placement
-    -- (toggling OFF kills the thread between shelfBusy=true and =false, which would
-    -- otherwise leave it stuck true and block every future pass).
+    
     shelfBusy = false
-    shelfOccupied, shelfTooBig = {}, {}
-    shelfFullLatch = false
-    shelfSalesMark = player:GetAttribute("LifetimeNPCSales") or 0
+    
     -- The instant a shelf item SELLS (LifetimeNPCSales ticks up) a slot opened →
-    -- re-discover and fill it immediately, no waiting for the next scan.
+    -- trigger doShelfPass immediately.
     shelfSalesConn = player:GetAttributeChangedSignal("LifetimeNPCSales"):Connect(function()
         if State.AutoShelf and not hasPendingPriorities() then
-            shelfOccupied = {}
-            shelfFullLatch = false
             task.spawn(doShelfPass)
         end
     end)
+    
     shelfThread = task.spawn(function()
         while State.AutoShelf do
             if hasPendingPriorities() then
@@ -1312,7 +1320,7 @@ end
 -- ─── ANTI-AFK ────────────────────────────────────────────────────────
 local afkThread
 local function startAntiAFK()
-    if afkThread then task.cancel(afkThread) end
+    if afkThread then pcall(task.cancel, afkThread) end
     afkThread = task.spawn(function()
         while true do
             if State.AntiAFK then
@@ -1704,14 +1712,14 @@ local function startAutoCollectLost()
                 if lostFolder and rootPart then
                     local targets = {}
                     for _, item in ipairs(lostFolder:GetChildren()) do
-                        local prompt = nil
-                        for _, d in ipairs(item:GetDescendants()) do
-                            if d:IsA("ProximityPrompt") and d.Name == "PickupPrompt" and d.Enabled then
-                                prompt = d
-                                break
-                            end
-                        end
                         local base = item:FindFirstChild("Base") or item:FindFirstChildWhichIsA("BasePart")
+                        local prompt = base and base:FindFirstChild("PickupPrompt")
+                        if not prompt then
+                            prompt = item:FindFirstChild("PickupPrompt")
+                        end
+                        if prompt and not prompt.Enabled then
+                            prompt = nil
+                        end
                         local pos = base and base.Position or item:GetPivot().Position
                         if prompt then
                             table.insert(targets, {
@@ -2485,20 +2493,39 @@ local function startSellInventory()
                 task.wait(1)
                 continue
             end
+            
+            -- Dynamic Pawn Sell check
+            local targetMultiplier = 1 + (State.MinPawnPercent / 100)
+            if State.DynamicPawnSell and currentPawnRate < targetMultiplier then
+                local currentPct = math.round((currentPawnRate - 1) * 100)
+                State.status = string.format("⏳ Pawn rate %+d%% < Min %+d%%", currentPct, State.MinPawnPercent)
+                task.wait(2)
+                continue
+            end
+
             local ok, items = pcall(function() return R.GetSellableItems:InvokeServer() end)
             if ok and type(items) == "table" then
                 local guids = {}
                 local totalBaseVal = 0
                 for guid, entry in pairs(items) do
                     if entry.Favorited ~= true then
-                        table.insert(guids, guid)
                         local baseVal = shelfPrice(tostring(entry.ItemId), entry)
-                        totalBaseVal = totalBaseVal + baseVal
+                        local okToSell = true
+                        
+                        -- Price filter check
+                        if State.PawnSellFilterPrice and baseVal > State.PawnSellMaxPrice then
+                            okToSell = false
+                        end
+                        
+                        if okToSell then
+                            table.insert(guids, guid)
+                            totalBaseVal = totalBaseVal + baseVal
+                        end
                     end
                 end
                 
                 if #guids > 0 then
-                    State.status = "💰 Selling Quick Sell items..."
+                    State.status = "💰 Selling " .. #guids .. " items..."
                     local ok2, result = pcall(function() return R.SellItems:InvokeServer(guids) end)
                     if ok2 and type(result) == "table" then
                         if result.success then
@@ -2515,7 +2542,7 @@ local function startSellInventory()
                         State.status = "⚠️ Sale failed"
                     end
                 else
-                    State.status = "📭 No items to quick sell"
+                    State.status = "📭 No items pass selling filters"
                 end
             else
                 State.status = "⚠️ Failed to fetch sellable items"
@@ -3321,6 +3348,22 @@ toggle("✦","Sell Inventory",function(on)
     end
 end, "SellInventory")
 local quickSellRateLabel = labelRow("Quick Sell Rate", "+0%")
+
+toggle("✦","Dynamic Pawn Sell",function(on)
+    State.DynamicPawnSell = on
+end, "DynamicPawnSell")
+
+numberInput("  Min Pawn Rate (%)", 5, function(val)
+    State.MinPawnPercent = val
+end, "MinPawnPercent")
+
+toggle("✦","Filter Pawn Sell Price",function(on)
+    State.PawnSellFilterPrice = on
+end, "PawnSellFilterPrice")
+
+numberInput("  Max Sell Value ($)", 100, function(val)
+    State.PawnSellMaxPrice = val
+end, "PawnSellMaxPrice")
 toggle("✦","Auto Grade Highest Value Item",function(on)
     State.AutoGradeHighest = on
     if on then startAutoGrade(); State.status = "[Grade] Auto-grade ON"
@@ -3658,9 +3701,7 @@ track(RunService.Heartbeat:Connect(function(dt)
         and Color3.fromRGB(math.floor(120+135*p),20,20)
         or Color3.fromRGB(40,40,40)
 
-    if not State.myPlot or not State.myPlot.Parent then
-        State.myPlot = findMyPlot()
-    end
+
 end))
 
 -- Dynamic Plot Sales (NPC) Tracker

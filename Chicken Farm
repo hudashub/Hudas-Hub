@@ -1,0 +1,756 @@
+--[[
+    ============================================================
+       HUDAS HUB  -  Chicken Farm Auto-Farm
+       PlaceId: 137233438285284  (Skandi Studios)
+       Uses the "Paper" Network framework:
+         Paper.Network.FireServer("Method", ...)
+         Paper.Network.InvokeServer("Method", ...)
+       State via Paper.Stats.GetValue("Name").
+    ============================================================
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService      = game:GetService("HttpService")
+local VirtualUser      = game:GetService("VirtualUser")
+local ReplicatedStorage= game:GetService("ReplicatedStorage")
+local LocalPlayer      = Players.LocalPlayer
+
+local HUB = {
+    name     = "HUDAS HUB",
+    subtitle = "Chicken Farm  •  Auto-Farm",
+    guiName  = "HudasHub_ChickenFarm",
+    profDir  = "HudasHub_ChickenFarm_Profiles",
+    logoFile = "HudasHub_Logo.png",
+    logoAsset= "",
+}
+
+-- ===== Single-instance guard (stops previous runs) =====
+_G.__HudasHub_gen = (_G.__HudasHub_gen or 0) + 1
+local MY_GEN = _G.__HudasHub_gen
+local function alive() return _G.__HudasHub_gen == MY_GEN end
+pcall(function()
+    if not getgc then return end
+    for _, o in getgc(true) do
+        if type(o) == "table" and rawget(o, "__HudasHubFlags") then
+            for k, v in pairs(o) do
+                if type(v) == "boolean" and k ~= "__HudasHubFlags" then rawset(o, k, false) end
+            end
+        end
+    end
+end)
+
+-- ===== Game modules =====
+local Paper       = require(ReplicatedStorage.Paper)
+local ChickensMod = require(ReplicatedStorage.Modules.Shared.Chickens)
+local ChickensTbl = require(ReplicatedStorage.Tables.Chickens)
+local LuckyBlocks = require(ReplicatedStorage.Tables.Luckyblocks)
+local MAX_TIER    = #ChickensTbl
+pcall(function() Paper.Stats.LoadedAsync() end)
+
+local function S(k)
+    local ok, v = pcall(function() return Paper.Stats.GetValue(k) end)
+    return ok and v or nil
+end
+
+-- ===== Feature flags =====
+local F = {
+    __HudasHubFlags = true,
+    collectEggs   = false,
+    depositEggs   = false,
+    smartDeposit  = false,  -- only deposit when EggMultiplier >= depositThreshold
+    collectCash   = false,
+    buyChickens   = false,
+    mergeChickens = false,
+    upgradeTier   = false,
+    upgradeProc   = false,
+    antiAfk       = true,
+    autoLucky     = false,  -- collect + open lucky blocks (free/affordable)
+    discardCostly = false,  -- discard an equipped lucky block we can't afford
+}
+local buyAmounts = { [1] = true, [5] = true, [25] = true, [100] = true }
+
+-- periodic egg multiplier (Values.EggMultiplier, ~0.5..1.5, changes ~30s).
+-- Deposit value = held eggs * this multiplier, so deposit at the peak.
+local Values = ReplicatedStorage:FindFirstChild("Values")
+local function eggMult()
+    local em = Values and Values:FindFirstChild("EggMultiplier")
+    return em and em.Value or 1
+end
+local depositThreshold = 1.5  -- "Smart Deposit" fires only when mult >= this
+
+-- ===== Feature logic =====
+local function doCollectEggs()
+    local folder = workspace:FindFirstChild("Eggs")
+    if not folder then return end
+    for _, egg in folder:GetChildren() do
+        if not egg:GetAttribute("LuckyBlock") then  -- skip lucky blocks (handled separately)
+            Paper.Network.FireServer("Collect Egg", egg.Name)
+            pcall(function() egg:Destroy() end)      -- remove visual so eggs don't linger
+        end
+    end
+end
+
+-- Lucky blocks: rain into workspace.Eggs (attr "LuckyBlock"=type). Open cost =
+-- GetLuckyBlockCost(TotalChickens, type) = floor(BaseCost * TotalChickens^0.8).
+-- Smart rule: only collect a block we can already AFFORD to open (prefer the rarest
+-- affordable one), then open it immediately. Blocks we can't afford are left on the
+-- ground (they linger ~5 min) until our cash grows enough.
+local function lbCost(t) return ChickensMod.GetLuckyBlockCost(S("TotalChickens") or 0, t) end
+local function doLuckyBlocks()
+    local equipped = S("EquippedLuckyBlock") or 0
+    if equipped > 0 then
+        -- already holding one: open if free/affordable, else hold (or discard)
+        if S("IsCurrentLuckyBlockFree") or (S("Cash") or 0) >= lbCost(equipped) then
+            if Paper.Network.InvokeServer("Open Lucky Block") then
+                Paper.Network.FireServer("Claim Opened Chicken")
+            end
+        elseif F.discardCostly then
+            Paper.Network.FireServer("Discard Lucky Block")
+        end
+        return
+    end
+    -- slot empty: pick the rarest dropped block we can afford, collect + open it
+    local folder = workspace:FindFirstChild("Eggs")
+    if not folder then return end
+    local cash = S("Cash") or 0
+    local bestModel, bestType
+    for _, m in folder:GetChildren() do
+        local t = m:GetAttribute("LuckyBlock")
+        if t and cash >= lbCost(t) and (not bestType or t > bestType) then
+            bestType, bestModel = t, m
+        end
+    end
+    if bestModel then
+        if Paper.Network.InvokeServer("Collect Lucky Block", bestModel.Name) then
+            pcall(function() bestModel:Destroy() end)
+            if Paper.Network.InvokeServer("Open Lucky Block") then
+                Paper.Network.FireServer("Claim Opened Chicken")
+            end
+        end
+    end
+end
+
+local function doDepositEggs()
+    if (S("Eggs") or 0) <= 0 then return end
+    -- Smart Deposit: hold eggs until the multiplier is at/above the threshold
+    if F.smartDeposit and eggMult() < depositThreshold then return end
+    Paper.Network.InvokeServer("Deposit Eggs")
+end
+
+local function doCollectCash()
+    if (S("CashCollect") or 0) > 0 then Paper.Network.InvokeServer("Collect Cash") end
+end
+
+local function buyCost(amt)
+    return ChickensMod.GetBuyChickenCost(S("TotalChickens") or 0, S("BuyTierLevel") or 1, amt)
+end
+local function doBuyChickens()
+    local cash = S("Cash") or 0
+    for _, amt in ipairs({ 100, 25, 5, 1 }) do
+        if buyAmounts[amt] and cash >= buyCost(amt) then
+            Paper.Network.InvokeServer("Buy Chickens", amt)
+            return
+        end
+    end
+end
+
+local function doMergeChickens()
+    local c = S("Chickens")
+    if type(c) ~= "table" then return end
+    for tier, count in c do
+        if count >= 3 and tier < MAX_TIER then
+            Paper.Network.InvokeServer("Merge Chickens")
+            return
+        end
+    end
+end
+
+local function doUpgradeTier()
+    local tier = S("BuyTierLevel") or 1
+    local cost = ChickensMod.GetUpgTierCost(tier)
+    if not cost then return end  -- already max tier
+    local req = ChickensMod.GetUpgTierReq(tier)
+    if (S("TotalChickens") or 0) >= req and (S("Cash") or 0) >= cost then
+        Paper.Network.InvokeServer("Upgrade Buy Tier Level")
+    end
+end
+
+local function doUpgradeProc()
+    local lvl = S("ProcessingLevel") or 1
+    local cost = ChickensMod.GetProcessCost(lvl)
+    if cost and (S("Cash") or 0) >= cost then
+        Paper.Network.InvokeServer("Upgrade Process Level")
+    end
+end
+
+-- Anti-AFK
+pcall(function()
+    LocalPlayer.Idled:Connect(function()
+        if not F.antiAfk then return end
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end)
+
+-- ===== Loops =====
+task.spawn(function()  -- fast: eggs + cash
+    while alive() do
+        pcall(function()
+            if F.collectEggs then doCollectEggs() end
+            if F.depositEggs or F.smartDeposit then doDepositEggs() end
+            if F.collectCash then doCollectCash() end
+        end)
+        task.wait(0.25)
+    end
+end)
+task.spawn(function()  -- slow: spending
+    while alive() do
+        pcall(function()
+            if F.mergeChickens then doMergeChickens() end
+            if F.upgradeTier   then doUpgradeTier()   end
+            if F.upgradeProc   then doUpgradeProc()   end
+            if F.buyChickens   then doBuyChickens()   end
+            if F.autoLucky     then doLuckyBlocks()   end
+        end)
+        task.wait(0.6)
+    end
+end)
+
+-- ===== Stats line =====
+local function fmt(n)
+    n = math.floor(tonumber(n) or 0)
+    if n >= 1e12 then return string.format("%.2fT", n/1e12)
+    elseif n >= 1e9 then return string.format("%.2fB", n/1e9)
+    elseif n >= 1e6 then return string.format("%.2fM", n/1e6)
+    elseif n >= 1e3 then return string.format("%.2fK", n/1e3)
+    else return tostring(n) end
+end
+local function statsText()
+    return string.format(
+        "Cash: $%s   Tier: %s\nChickens: %s   Eggs: %s\nProcess Lvl: %s   Selling: %s\nPending: $%s   Egg Mult: %.2fx",
+        fmt(S("Cash")), tostring(S("BuyTierLevel") or 1),
+        fmt(S("TotalChickens")), fmt(S("Eggs")),
+        tostring(S("ProcessingLevel") or 1), fmt(S("EggsProcessing")),
+        fmt(S("CashCollect")), eggMult())
+end
+
+-- ============================================================
+--  GUI  (Hudas Hub standard: wide grouped layout, responsive,
+--        dropdown profiles, floating logo toggle)
+-- ============================================================
+local COL = {
+    bg = Color3.fromRGB(15,15,17), panel = Color3.fromRGB(22,22,26),
+    red = Color3.fromRGB(200,30,40), redDim = Color3.fromRGB(60,22,26),
+    on = Color3.fromRGB(220,40,50), off = Color3.fromRGB(45,45,52),
+    text = Color3.fromRGB(235,235,240), sub = Color3.fromRGB(150,150,160),
+    accent = Color3.fromRGB(255,70,80),
+}
+
+-- resolve a safe GUI parent. gethui() here returns RobloxGui (a ScreenGui);
+-- nesting a ScreenGui inside a ScreenGui doesn't render reliably, so prefer
+-- PlayerGui, then a non-ScreenGui gethui container, then CoreGui.
+local guiParent
+pcall(function()
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
+    if pg then guiParent = pg end
+end)
+if not guiParent then
+    pcall(function()
+        if gethui then
+            local h = gethui()
+            if h and h:IsA("ScreenGui") then h = h.Parent end  -- avoid ScreenGui-in-ScreenGui
+            if h then guiParent = h end
+        end
+    end)
+end
+if not guiParent then guiParent = game:GetService("CoreGui") end
+pcall(function()
+    local prev = guiParent:FindFirstChild(HUB.guiName)
+    if prev then prev:Destroy() end
+end)
+local screen = Instance.new("ScreenGui")
+screen.Name = HUB.guiName
+screen.ResetOnSpawn = false
+screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screen.Parent = guiParent
+
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(500, 560)
+main.Position = UDim2.fromScale(0.58, 0.12)
+main.BackgroundColor3 = COL.bg
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = screen
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+local stroke = Instance.new("UIStroke", main); stroke.Color = COL.red; stroke.Thickness = 1.5; stroke.Transparency = 0.2
+
+-- responsive
+local DESIGN_W, DESIGN_H = 500, 560
+local camera = workspace.CurrentCamera
+local fab
+local uiScale = Instance.new("UIScale"); uiScale.Parent = main
+local function responsiveHeight()
+    local vp = camera and camera.ViewportSize
+    if not vp or vp.Y < 1 then return DESIGN_H end
+    local s = uiScale.Scale > 0 and uiScale.Scale or 1
+    return math.min(DESIGN_H, (vp.Y * 0.9) / s)
+end
+local function applyResponsive()
+    local vp = camera and camera.ViewportSize
+    if not vp or vp.X < 1 or vp.Y < 1 then return end
+    local scale = math.clamp(math.min(vp.X/1366, vp.Y/768), 0.5, 1.2)
+    uiScale.Scale = scale
+    main.Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())
+    local pxW, pxH = DESIGN_W*scale, responsiveHeight()*scale
+    if main.AbsoluteSize.X > 0 then
+        local ap = main.AbsolutePosition
+        main.Position = UDim2.fromOffset(
+            math.clamp(ap.X, 0, math.max(0, vp.X - pxW)),
+            math.clamp(ap.Y, 0, math.max(0, vp.Y - pxH)))
+    end
+    if fab then
+        local fs = math.floor(54*scale)
+        fab.Size = UDim2.fromOffset(fs, fs)
+        if fab.AbsoluteSize.X > 0 then
+            local fp = fab.AbsolutePosition
+            fab.Position = UDim2.fromOffset(
+                math.clamp(fp.X, 0, math.max(0, vp.X - fs)),
+                math.clamp(fp.Y, 0, math.max(0, vp.Y - fs)))
+        end
+    end
+end
+
+-- title bar
+local bar = Instance.new("Frame")
+bar.Size = UDim2.new(1, 0, 0, 46); bar.BackgroundColor3 = COL.panel; bar.BorderSizePixel = 0; bar.Parent = main
+Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 10)
+local accentLine = Instance.new("Frame")
+accentLine.Size = UDim2.new(1, 0, 0, 2); accentLine.Position = UDim2.new(0, 0, 1, -2)
+accentLine.BackgroundColor3 = COL.red; accentLine.BorderSizePixel = 0; accentLine.Parent = bar
+local titleL = Instance.new("TextLabel")
+titleL.Size = UDim2.new(1, -20, 0, 22); titleL.Position = UDim2.fromOffset(14, 6); titleL.BackgroundTransparency = 1
+titleL.Font = Enum.Font.GothamBlack; titleL.Text = HUB.name; titleL.TextColor3 = COL.accent
+titleL.TextXAlignment = Enum.TextXAlignment.Left; titleL.TextSize = 18; titleL.Parent = bar
+local subL = Instance.new("TextLabel")
+subL.Size = UDim2.new(1, -20, 0, 14); subL.Position = UDim2.fromOffset(14, 27); subL.BackgroundTransparency = 1
+subL.Font = Enum.Font.GothamMedium; subL.Text = HUB.subtitle; subL.TextColor3 = COL.sub
+subL.TextXAlignment = Enum.TextXAlignment.Left; subL.TextSize = 11; subL.Parent = bar
+
+-- stats
+local stats = Instance.new("TextLabel")
+stats.Size = UDim2.new(1, -24, 0, 64); stats.Position = UDim2.fromOffset(12, 54)
+stats.BackgroundColor3 = COL.panel; stats.BorderSizePixel = 0; stats.Font = Enum.Font.Code
+stats.TextColor3 = COL.text; stats.TextXAlignment = Enum.TextXAlignment.Left; stats.TextYAlignment = Enum.TextYAlignment.Top
+stats.TextSize = 11; stats.Text = ""; stats.Parent = main
+Instance.new("UICorner", stats).CornerRadius = UDim.new(0, 6)
+local sp = Instance.new("UIPadding", stats); sp.PaddingLeft = UDim.new(0, 8); sp.PaddingTop = UDim.new(0, 6)
+
+-- body
+local controls = {}
+local list = Instance.new("ScrollingFrame")
+list.Size = UDim2.new(1, -18, 1, -136); list.Position = UDim2.fromOffset(12, 126)
+list.BackgroundTransparency = 1; list.BorderSizePixel = 0; list.ScrollBarThickness = 4
+list.ScrollBarImageColor3 = COL.red; list.CanvasSize = UDim2.new(); list.AutomaticCanvasSize = Enum.AutomaticSize.Y; list.Parent = main
+local listLayout = Instance.new("UIListLayout", list); listLayout.Padding = UDim.new(0, 8); listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function makeToggle(label, flagKey, parent, order)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 32); btn.BackgroundColor3 = COL.off; btn.AutoButtonColor = false
+    btn.Text = ""; btn.LayoutOrder = order or 0; btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    local bs = Instance.new("UIStroke", btn); bs.Color = COL.red; bs.Transparency = 0.6; bs.Thickness = 1
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -46, 1, 0); lbl.Position = UDim2.fromOffset(10, 0); lbl.BackgroundTransparency = 1
+    lbl.Font = Enum.Font.GothamMedium; lbl.Text = label; lbl.TextColor3 = COL.text
+    lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.TextSize = 12; lbl.TextTruncate = Enum.TextTruncate.AtEnd; lbl.Parent = btn
+    local pill = Instance.new("Frame")
+    pill.Size = UDim2.fromOffset(34, 18); pill.Position = UDim2.new(1, -40, 0.5, -9)
+    pill.BackgroundColor3 = Color3.fromRGB(35,35,40); pill.Parent = btn
+    Instance.new("UICorner", pill).CornerRadius = UDim.new(1, 0)
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.fromOffset(14, 14); knob.Position = UDim2.fromOffset(2, 2)
+    knob.BackgroundColor3 = Color3.fromRGB(120,120,130); knob.Parent = pill
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+    local function render()
+        local on = F[flagKey]
+        local okTween = pcall(function()
+            knob:TweenPosition(UDim2.fromOffset(on and 18 or 2, 2), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.12, true)
+        end)
+        if not okTween then knob.Position = UDim2.fromOffset(on and 18 or 2, 2) end
+        pill.BackgroundColor3 = on and COL.on or Color3.fromRGB(35,35,40)
+        knob.BackgroundColor3 = on and Color3.fromRGB(255,255,255) or Color3.fromRGB(120,120,130)
+        btn.BackgroundColor3 = on and COL.redDim or COL.off
+        bs.Transparency = on and 0.1 or 0.6
+    end
+    btn.MouseButton1Click:Connect(function() F[flagKey] = not F[flagKey]; render() end)
+    controls[flagKey] = { get = function() return F[flagKey] end,
+                          set = function(v) F[flagKey] = v and true or false; render() end }
+    render(); return btn
+end
+
+local function makeChip(parent, text, stateTbl, stateKey, ctrlKey, order, widthUDim)
+    local chip = Instance.new("TextButton")
+    chip.Size = widthUDim; chip.AutoButtonColor = false; chip.Font = Enum.Font.GothamBold
+    chip.TextSize = 11; chip.Text = text; chip.LayoutOrder = order; chip.Parent = parent
+    Instance.new("UICorner", chip).CornerRadius = UDim.new(0, 6)
+    local cs = Instance.new("UIStroke", chip); cs.Color = COL.red; cs.Thickness = 1
+    local function render()
+        local on = stateTbl[stateKey]
+        chip.BackgroundColor3 = on and COL.on or Color3.fromRGB(35,35,40)
+        chip.TextColor3 = on and Color3.fromRGB(255,255,255) or COL.sub
+        cs.Transparency = on and 0.1 or 0.7
+    end
+    chip.MouseButton1Click:Connect(function() stateTbl[stateKey] = not stateTbl[stateKey]; render() end)
+    controls[ctrlKey] = { get = function() return stateTbl[stateKey] end,
+                          set = function(v) stateTbl[stateKey] = v and true or false; render() end }
+    render()
+end
+
+local function makeColumn(parent, headerText, order)
+    local col = Instance.new("Frame")
+    col.Size = UDim2.new(1/3, -6, 0, 0); col.AutomaticSize = Enum.AutomaticSize.Y
+    col.BackgroundTransparency = 1; col.LayoutOrder = order; col.Parent = parent
+    local cl = Instance.new("UIListLayout", col); cl.Padding = UDim.new(0, 5); cl.SortOrder = Enum.SortOrder.LayoutOrder
+    local h = Instance.new("TextLabel")
+    h.Size = UDim2.new(1, 0, 0, 16); h.BackgroundTransparency = 1; h.Font = Enum.Font.GothamBold
+    h.Text = headerText; h.TextColor3 = COL.accent; h.TextXAlignment = Enum.TextXAlignment.Left
+    h.TextSize = 11; h.LayoutOrder = 0; h.Parent = col
+    return col
+end
+
+-- columns
+local columnsRow = Instance.new("Frame")
+columnsRow.Size = UDim2.new(1, 0, 0, 0); columnsRow.AutomaticSize = Enum.AutomaticSize.Y
+columnsRow.BackgroundTransparency = 1; columnsRow.LayoutOrder = 1; columnsRow.Parent = list
+local crl = Instance.new("UIListLayout", columnsRow)
+crl.FillDirection = Enum.FillDirection.Horizontal; crl.Padding = UDim.new(0, 8)
+crl.SortOrder = Enum.SortOrder.LayoutOrder; crl.VerticalAlignment = Enum.VerticalAlignment.Top
+
+local col1 = makeColumn(columnsRow, "EGGS & CASH", 1)
+makeToggle("Collect Eggs",  "collectEggs", col1, 1)
+makeToggle("Deposit Eggs",  "depositEggs", col1, 2)
+makeToggle("Smart Deposit", "smartDeposit", col1, 3)
+do  -- threshold radio: deposit only when egg multiplier >= selected value
+    local THRESHOLDS = { 1.0, 1.2, 1.3, 1.5 }
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 22); row.BackgroundTransparency = 1; row.LayoutOrder = 4; row.Parent = col1
+    local rl = Instance.new("UIListLayout", row)
+    rl.FillDirection = Enum.FillDirection.Horizontal; rl.Padding = UDim.new(0, 4); rl.SortOrder = Enum.SortOrder.LayoutOrder
+    local chips = {}
+    local function renderAll()
+        for v, chip in pairs(chips) do
+            local on = (depositThreshold == v)
+            chip.BackgroundColor3 = on and COL.on or Color3.fromRGB(35, 35, 40)
+            chip.TextColor3 = on and Color3.fromRGB(255, 255, 255) or COL.sub
+            local s = chip:FindFirstChildOfClass("UIStroke"); if s then s.Transparency = on and 0.1 or 0.7 end
+        end
+    end
+    for i, v in ipairs(THRESHOLDS) do
+        local chip = Instance.new("TextButton")
+        chip.Size = UDim2.new(0.25, -3, 1, 0); chip.AutoButtonColor = false
+        chip.Font = Enum.Font.GothamBold; chip.TextSize = 10; chip.Text = string.format("%.1f", v)
+        chip.LayoutOrder = i; chip.Parent = row
+        Instance.new("UICorner", chip).CornerRadius = UDim.new(0, 6)
+        local cs = Instance.new("UIStroke", chip); cs.Color = COL.red; cs.Thickness = 1
+        chips[v] = chip
+        chip.MouseButton1Click:Connect(function() depositThreshold = v; renderAll() end)
+    end
+    controls["depositThreshold"] = {
+        get = function() return depositThreshold end,
+        set = function(v) depositThreshold = tonumber(v) or 1.5; renderAll() end,
+    }
+    renderAll()
+end
+makeToggle("Collect Cash",  "collectCash", col1, 5)
+
+local col2 = makeColumn(columnsRow, "CHICKENS", 2)
+makeToggle("Buy Chickens", "buyChickens", col2, 1)
+do
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 24); row.BackgroundTransparency = 1; row.LayoutOrder = 2; row.Parent = col2
+    local rl = Instance.new("UIListLayout", row)
+    rl.FillDirection = Enum.FillDirection.Horizontal; rl.Padding = UDim.new(0, 4); rl.SortOrder = Enum.SortOrder.LayoutOrder
+    local cw = UDim2.new(0.25, -3, 1, 0)
+    makeChip(row, "+1",   buyAmounts, 1,   "buy1",   1, cw)
+    makeChip(row, "+5",   buyAmounts, 5,   "buy5",   2, cw)
+    makeChip(row, "+25",  buyAmounts, 25,  "buy25",  3, cw)
+    makeChip(row, "+100", buyAmounts, 100, "buy100", 4, cw)
+end
+makeToggle("Merge Chickens", "mergeChickens", col2, 3)
+
+local col3 = makeColumn(columnsRow, "UPGRADES", 3)
+makeToggle("Upgrade Buy Tier", "upgradeTier", col3, 1)
+makeToggle("Upgrade Process",  "upgradeProc", col3, 2)
+makeToggle("Anti-AFK",         "antiAfk",     col3, 3)
+
+-- LUCKY BLOCKS (full-width section)
+local luckyWrap = Instance.new("Frame")
+luckyWrap.Size = UDim2.new(1, 0, 0, 0); luckyWrap.AutomaticSize = Enum.AutomaticSize.Y
+luckyWrap.BackgroundTransparency = 1; luckyWrap.LayoutOrder = 2; luckyWrap.Parent = list
+local lwl = Instance.new("UIListLayout", luckyWrap); lwl.Padding = UDim.new(0, 5); lwl.SortOrder = Enum.SortOrder.LayoutOrder
+do
+    local div = Instance.new("Frame")
+    div.Size = UDim2.new(1, 0, 0, 1); div.BackgroundColor3 = COL.red; div.BackgroundTransparency = 0.4
+    div.BorderSizePixel = 0; div.LayoutOrder = 1; div.Parent = luckyWrap
+    local h = Instance.new("TextLabel")
+    h.Size = UDim2.new(1, 0, 0, 16); h.BackgroundTransparency = 1; h.Font = Enum.Font.GothamBold
+    h.Text = "LUCKY BLOCKS"; h.TextColor3 = COL.accent; h.TextXAlignment = Enum.TextXAlignment.Left
+    h.TextSize = 11; h.LayoutOrder = 2; h.Parent = luckyWrap
+    local cap = Instance.new("TextLabel")
+    cap.Size = UDim2.new(1, 0, 0, 13); cap.BackgroundTransparency = 1; cap.Font = Enum.Font.GothamMedium
+    cap.Text = "Only grabs the rarest block you can afford; leaves costly ones"
+    cap.TextColor3 = COL.sub; cap.TextXAlignment = Enum.TextXAlignment.Left; cap.TextSize = 10
+    cap.LayoutOrder = 3; cap.Parent = luckyWrap
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 32); row.BackgroundTransparency = 1; row.LayoutOrder = 4; row.Parent = luckyWrap
+    local rl = Instance.new("UIListLayout", row); rl.FillDirection = Enum.FillDirection.Horizontal
+    rl.Padding = UDim.new(0, 8); rl.SortOrder = Enum.SortOrder.LayoutOrder
+    local left = Instance.new("Frame"); left.Size = UDim2.new(0.5, -4, 1, 0); left.BackgroundTransparency = 1; left.LayoutOrder = 1; left.Parent = row
+    local right = Instance.new("Frame"); right.Size = UDim2.new(0.5, -4, 1, 0); right.BackgroundTransparency = 1; right.LayoutOrder = 2; right.Parent = row
+    makeToggle("Auto Open Lucky", "autoLucky",    left,  1)
+    makeToggle("Discard If Costly","discardCostly", right, 1)
+end
+
+-- ===== PROFILES (dropdown manager) =====
+local hasFiles = (writefile and readfile and listfiles and isfolder and makefolder and delfile) and true or false
+local function ensureFolder() if hasFiles and not isfolder(HUB.profDir) then pcall(makefolder, HUB.profDir) end end
+local function ppath(n) return HUB.profDir .. "/" .. n .. ".json" end
+local function listProfiles()
+    local out = {}
+    if not hasFiles or not isfolder(HUB.profDir) then return out end
+    local ok, files = pcall(listfiles, HUB.profDir)
+    if ok then for _, f in ipairs(files) do
+        local nm = f:match("([^/\\]+)%.json$"); if nm then table.insert(out, nm) end
+    end end
+    return out
+end
+local function saveProfile(n)
+    if not hasFiles or n == "" then return false end
+    ensureFolder()
+    local data = {}
+    for k, c in pairs(controls) do local ok, v = pcall(c.get); if ok then data[k] = v end end
+    return (pcall(function() writefile(ppath(n), HttpService:JSONEncode(data)) end))
+end
+local function applyProfile(n)
+    if not hasFiles then return false end
+    local ok, raw = pcall(readfile, ppath(n)); if not ok then return false end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok2 or type(data) ~= "table" then return false end
+    for k, v in pairs(data) do if controls[k] then pcall(controls[k].set, v) end end
+    return true
+end
+
+local profWrap = Instance.new("Frame")
+profWrap.Size = UDim2.new(1, 0, 0, 0); profWrap.AutomaticSize = Enum.AutomaticSize.Y
+profWrap.BackgroundTransparency = 1; profWrap.LayoutOrder = 50; profWrap.Parent = list
+local pwl = Instance.new("UIListLayout", profWrap); pwl.Padding = UDim.new(0, 6); pwl.SortOrder = Enum.SortOrder.LayoutOrder
+local pDiv = Instance.new("Frame")
+pDiv.Size = UDim2.new(1, 0, 0, 1); pDiv.BackgroundColor3 = COL.red; pDiv.BackgroundTransparency = 0.4
+pDiv.BorderSizePixel = 0; pDiv.LayoutOrder = 1; pDiv.Parent = profWrap
+local pHead = Instance.new("TextLabel")
+pHead.Size = UDim2.new(1, 0, 0, 18); pHead.BackgroundTransparency = 1; pHead.Font = Enum.Font.GothamBold
+pHead.Text = "PROFILES"; pHead.TextColor3 = COL.accent; pHead.TextXAlignment = Enum.TextXAlignment.Left
+pHead.TextSize = 12; pHead.LayoutOrder = 2; pHead.Parent = profWrap
+
+if not hasFiles then
+    local w = Instance.new("TextLabel")
+    w.Size = UDim2.new(1, 0, 0, 16); w.BackgroundTransparency = 1; w.Font = Enum.Font.Gotham
+    w.Text = "Executor has no file API"; w.TextColor3 = COL.sub
+    w.TextXAlignment = Enum.TextXAlignment.Left; w.TextSize = 11; w.LayoutOrder = 3; w.Parent = profWrap
+else
+    local inputRow = Instance.new("Frame")
+    inputRow.Size = UDim2.new(1, 0, 0, 30); inputRow.BackgroundTransparency = 1; inputRow.LayoutOrder = 3; inputRow.Parent = profWrap
+    local nameBox = Instance.new("TextBox")
+    nameBox.Size = UDim2.new(1, -74, 1, 0); nameBox.BackgroundColor3 = COL.off
+    nameBox.Text = ""; nameBox.PlaceholderText = "new profile name..."; nameBox.PlaceholderColor3 = COL.sub
+    nameBox.Font = Enum.Font.Gotham; nameBox.TextColor3 = COL.text; nameBox.TextSize = 12
+    nameBox.ClearTextOnFocus = false; nameBox.Parent = inputRow
+    Instance.new("UICorner", nameBox).CornerRadius = UDim.new(0, 6)
+    local nbPad = Instance.new("UIPadding", nameBox); nbPad.PaddingLeft = UDim.new(0, 8); nbPad.PaddingRight = UDim.new(0, 8)
+    local createBtn = Instance.new("TextButton")
+    createBtn.Size = UDim2.new(0, 66, 1, 0); createBtn.Position = UDim2.new(1, -66, 0, 0)
+    createBtn.BackgroundColor3 = COL.on; createBtn.Font = Enum.Font.GothamBold; createBtn.Text = "+ Create"
+    createBtn.TextColor3 = Color3.fromRGB(255,255,255); createBtn.TextSize = 12; createBtn.Parent = inputRow
+    Instance.new("UICorner", createBtn).CornerRadius = UDim.new(0, 6)
+
+    local selected = nil
+    local ddButton = Instance.new("TextButton")
+    ddButton.Size = UDim2.new(1, 0, 0, 28); ddButton.BackgroundColor3 = COL.off; ddButton.AutoButtonColor = false
+    ddButton.Text = ""; ddButton.LayoutOrder = 4; ddButton.Parent = profWrap
+    Instance.new("UICorner", ddButton).CornerRadius = UDim.new(0, 6)
+    local ddStroke = Instance.new("UIStroke", ddButton); ddStroke.Color = COL.red; ddStroke.Transparency = 0.5
+    local ddLabel = Instance.new("TextLabel")
+    ddLabel.Size = UDim2.new(1, -32, 1, 0); ddLabel.Position = UDim2.fromOffset(10, 0); ddLabel.BackgroundTransparency = 1
+    ddLabel.Font = Enum.Font.GothamMedium; ddLabel.Text = "Select profile..."; ddLabel.TextColor3 = COL.sub
+    ddLabel.TextXAlignment = Enum.TextXAlignment.Left; ddLabel.TextSize = 12; ddLabel.TextTruncate = Enum.TextTruncate.AtEnd; ddLabel.Parent = ddButton
+    local ddArrow = Instance.new("TextLabel")
+    ddArrow.Size = UDim2.fromOffset(26, 28); ddArrow.Position = UDim2.new(1, -28, 0, 0); ddArrow.BackgroundTransparency = 1
+    ddArrow.Font = Enum.Font.GothamBold; ddArrow.Text = "v"; ddArrow.TextColor3 = COL.accent; ddArrow.TextSize = 12; ddArrow.Parent = ddButton
+
+    local ddList = Instance.new("Frame")
+    ddList.Size = UDim2.new(1, 0, 0, 0); ddList.AutomaticSize = Enum.AutomaticSize.Y
+    ddList.BackgroundColor3 = Color3.fromRGB(28,28,32); ddList.BorderSizePixel = 0; ddList.Visible = false
+    ddList.LayoutOrder = 5; ddList.Parent = profWrap
+    Instance.new("UICorner", ddList).CornerRadius = UDim.new(0, 6)
+    local ddll = Instance.new("UIListLayout", ddList); ddll.Padding = UDim.new(0, 2); ddll.SortOrder = Enum.SortOrder.LayoutOrder
+    local ddPad = Instance.new("UIPadding", ddList)
+    ddPad.PaddingTop = UDim.new(0,3); ddPad.PaddingBottom = UDim.new(0,3); ddPad.PaddingLeft = UDim.new(0,3); ddPad.PaddingRight = UDim.new(0,3)
+
+    local actionRow = Instance.new("Frame")
+    actionRow.Size = UDim2.new(1, 0, 0, 28); actionRow.BackgroundTransparency = 1; actionRow.Visible = false
+    actionRow.LayoutOrder = 6; actionRow.Parent = profWrap
+    local arl = Instance.new("UIListLayout", actionRow)
+    arl.FillDirection = Enum.FillDirection.Horizontal; arl.Padding = UDim.new(0, 6); arl.SortOrder = Enum.SortOrder.LayoutOrder
+    local function mkAction(txt, color, ord)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1/3, -4, 1, 0); b.BackgroundColor3 = color
+        b.Font = Enum.Font.GothamBold; b.Text = txt; b.TextColor3 = Color3.fromRGB(255,255,255)
+        b.TextSize = 11; b.LayoutOrder = ord; b.Parent = actionRow
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6); return b
+    end
+    local loadAct = mkAction("Load", COL.on, 1)
+    local owAct   = mkAction("Overwrite", Color3.fromRGB(150,90,30), 2)
+    local delAct  = mkAction("Delete", Color3.fromRGB(90,30,34), 3)
+
+    local refreshOptions
+    local function setSelected(name)
+        selected = name
+        ddLabel.Text = name or "Select profile..."
+        ddLabel.TextColor3 = name and COL.text or COL.sub
+        actionRow.Visible = name ~= nil
+    end
+    local function closeDropdown() ddList.Visible = false; ddArrow.Text = "v" end
+    refreshOptions = function()
+        for _, ch in ipairs(ddList:GetChildren()) do
+            if ch:IsA("TextButton") or ch:IsA("TextLabel") then ch:Destroy() end
+        end
+        local names = listProfiles()
+        if #names == 0 then
+            local e = Instance.new("TextLabel")
+            e.Size = UDim2.new(1, 0, 0, 22); e.BackgroundTransparency = 1; e.Font = Enum.Font.Gotham
+            e.Text = "(no profiles yet)"; e.TextColor3 = COL.sub; e.TextSize = 11; e.Parent = ddList
+        else
+            for i, nm in ipairs(names) do
+                local opt = Instance.new("TextButton")
+                opt.Size = UDim2.new(1, 0, 0, 24); opt.BackgroundColor3 = COL.off; opt.AutoButtonColor = true
+                opt.Font = Enum.Font.Gotham; opt.Text = "  " .. nm; opt.TextXAlignment = Enum.TextXAlignment.Left
+                opt.TextColor3 = COL.text; opt.TextSize = 12; opt.LayoutOrder = i; opt.Parent = ddList
+                Instance.new("UICorner", opt).CornerRadius = UDim.new(0, 5)
+                opt.MouseButton1Click:Connect(function() setSelected(nm); closeDropdown() end)
+            end
+        end
+        if selected then
+            local found = false
+            for _, nm in ipairs(names) do if nm == selected then found = true break end end
+            if not found then setSelected(nil) end
+        end
+    end
+    ddButton.MouseButton1Click:Connect(function()
+        ddList.Visible = not ddList.Visible
+        ddArrow.Text = ddList.Visible and "^" or "v"
+        if ddList.Visible then refreshOptions() end
+    end)
+    createBtn.MouseButton1Click:Connect(function()
+        local nm = (nameBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if nm == "" then return end
+        if saveProfile(nm) then nameBox.Text = ""; refreshOptions(); setSelected(nm) end
+    end)
+    loadAct.MouseButton1Click:Connect(function() if selected then applyProfile(selected) end end)
+    owAct.MouseButton1Click:Connect(function() if selected then saveProfile(selected) end end)
+    delAct.MouseButton1Click:Connect(function()
+        if selected then pcall(delfile, ppath(selected)); setSelected(nil); refreshOptions() end
+    end)
+    refreshOptions()
+end
+
+-- footer
+local credit = Instance.new("TextLabel")
+credit.Size = UDim2.new(1, 0, 0, 16); credit.Position = UDim2.new(0, 0, 1, -18); credit.BackgroundTransparency = 1
+credit.Font = Enum.Font.GothamMedium; credit.Text = "© Hudas Hub"; credit.TextColor3 = COL.sub; credit.TextSize = 10; credit.Parent = main
+
+-- stats updater (pcall-guarded so an early Stats hiccup can't kill the loop)
+task.spawn(function()
+    while alive() do
+        pcall(function() stats.Text = statsText() end)
+        task.wait(0.4)
+    end
+end)
+
+-- ===== Floating circular logo button =====
+local function resolveLogo()
+    if HUB.logoAsset ~= "" then return HUB.logoAsset end
+    local ok, id = pcall(function()
+        if getcustomasset and isfile and isfile(HUB.logoFile) then return getcustomasset(HUB.logoFile) end
+    end)
+    if ok and type(id) == "string" then return id end
+    return nil
+end
+fab = Instance.new("TextButton")
+fab.Name = "Toggle"; fab.Size = UDim2.fromOffset(54, 54); fab.Position = UDim2.fromScale(0.03, 0.42)
+fab.BackgroundColor3 = COL.bg; fab.AutoButtonColor = false; fab.Text = ""; fab.Active = true; fab.ZIndex = 20; fab.Parent = screen
+Instance.new("UICorner", fab).CornerRadius = UDim.new(1, 0)
+local fabRing = Instance.new("UIStroke", fab); fabRing.Color = Color3.fromRGB(235,70,50); fabRing.Thickness = 2.5; fabRing.Transparency = 0.05
+do
+    local logoId = resolveLogo()
+    if logoId then
+        local logo = Instance.new("ImageLabel")
+        logo.Size = UDim2.fromScale(0.84, 0.84); logo.Position = UDim2.fromScale(0.08, 0.08)
+        logo.BackgroundTransparency = 1; logo.Image = logoId; logo.ZIndex = 21; logo.Parent = fab
+        Instance.new("UICorner", logo).CornerRadius = UDim.new(1, 0)
+    else
+        local t = Instance.new("TextLabel")
+        t.Size = UDim2.fromScale(1, 1); t.BackgroundTransparency = 1; t.Font = Enum.Font.GothamBlack
+        t.Text = "HH"; t.TextColor3 = COL.accent; t.TextSize = 20; t.ZIndex = 21; t.Parent = fab
+    end
+end
+do
+    local dragging, moved, startInput, startPos
+    fab.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; moved = false; startInput = i.Position; startPos = fab.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - startInput
+            if math.abs(d.X) + math.abs(d.Y) > 6 then moved = true end
+            fab.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            if not moved then main.Visible = not main.Visible end
+            applyResponsive()
+        end
+    end)
+end
+
+-- panel dragging
+do
+    local dragging, dragStart, startPos
+    bar.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; dragStart = i.Position; startPos = main.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            if dragging then dragging = false; applyResponsive() end
+        end
+    end)
+end
+
+if camera then camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyResponsive) end
+task.defer(applyResponsive)
+applyResponsive()
+
+print("[Hudas Hub] Chicken Farm Auto-Farm loaded.")

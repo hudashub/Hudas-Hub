@@ -182,7 +182,7 @@ end
 -- Be sure to fill in your real raw script URLs here!
 local routes = {
     [98800969324557] = { "Storage Hunters: Open World", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Storage%20Hunters" },
-    [9910245722] = { "Iron Soul", "https://githubusercontent.com" },
+    [92605157087535] = { "Crab Tycoon", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Crab%20Tycoon" },
 }
 
 -- Check game routing matching both PlaceId or broader GameId (Universe ID)

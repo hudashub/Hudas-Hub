@@ -1,0 +1,1224 @@
+--[[
+    ============================================================
+       HUDAS HUB  -  Crab Tycoon Auto-Farm
+       PlaceId: 92605157087535  (Atlantean Co.)
+    ============================================================
+    Features (toggles):
+      - Auto Collect Shells   (scans workspace RollSpheres -> CollectShells)
+      - Auto Deposit Shells   (heldShells -> processing)
+      - Auto Collect Cash     (pendingCash -> cash)
+      - Auto Buy Crabs        (biggest affordable: 100/25/5/1)
+      - Auto Merge Crabs       (cascade merge-all when 3 of a kind)
+      - Auto Upgrade Buy Tier  (when crabPower gate + cash met)
+      - Auto Upgrade Appraisal (processing speed)
+    ============================================================
+]]
+
+local Players            = game:GetService("Players")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local RunService         = game:GetService("RunService")
+local UserInputService   = game:GetService("UserInputService")
+local VirtualUser        = game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ============================================================
+--  Single-instance guard: stop EVERY previous run before starting,
+--  so re-executing never stacks duplicate auto-farmers.
+--   (a) bump a global generation  -> guard-aware loops below exit
+--   (b) zero any leftover flag-tables still in memory -> legacy/zombie
+--       loops from older versions go idle (they read these flags)
+-- ============================================================
+_G.__HudasHub_gen = (_G.__HudasHub_gen or 0) + 1
+local MY_GEN = _G.__HudasHub_gen
+local function alive() return _G.__HudasHub_gen == MY_GEN end
+pcall(function()
+    if not getgc then return end
+    for _, o in getgc(true) do
+        if type(o) == "table"
+            and rawget(o, "collectShells") ~= nil and rawget(o, "buyCrabs") ~= nil
+            and rawget(o, "mergeCrabs") ~= nil and rawget(o, "depositShells") ~= nil then
+            for _, k in {"collectShells","depositShells","collectCash","buyCrabs","mergeCrabs","upgradeTier","upgradeAppr"} do
+                if rawget(o, k) ~= nil then rawset(o, k, false) end
+            end
+        end
+    end
+end)
+
+-- ===== Game modules / remotes =====
+local Remotes  = ReplicatedStorage:WaitForChild("Remotes")
+local Mirror   = require(ReplicatedStorage.Common.Mirror.MirrorClient)
+local CrabTiers= require(ReplicatedStorage.Common.CrabTiers)
+local Formulas = require(ReplicatedStorage.Common.Formulas)
+local EggConfig= require(ReplicatedStorage.Common.EggConfig)
+
+local R = {
+    CollectShells   = Remotes:WaitForChild("CollectShells"),
+    DepositShells   = Remotes:WaitForChild("DepositShells"),
+    CollectCash     = Remotes:WaitForChild("CollectCash"),
+    BuyCrab         = Remotes:WaitForChild("BuyCrab"),
+    MergeCrab       = Remotes:WaitForChild("MergeCrab"),
+    UpgradeBuyTier  = Remotes:WaitForChild("UpgradeBuyTier"),
+    UpgradeProcessing = Remotes:WaitForChild("UpgradeProcessing"),
+    UnlockSifting   = Remotes:WaitForChild("UnlockSifting"),
+    CollectSand     = Remotes:WaitForChild("CollectSand"),
+    RequestSift     = Remotes:WaitForChild("RequestSift"),
+    CollectEgg          = Remotes:WaitForChild("CollectEgg"),
+    IncubateEgg         = Remotes:WaitForChild("IncubateEgg"),
+    ClaimIncubator      = Remotes:WaitForChild("ClaimIncubator"),
+    QuickIncubateEgg    = Remotes:WaitForChild("QuickIncubateEgg"),
+    ClaimQuickIncubator = Remotes:WaitForChild("ClaimQuickIncubator"),
+}
+
+-- 7 egg types (EggConfig.EGG_DEFS order): 1..7
+local EGG_NAMES = { "Crimson", "Sand", "Moss", "Stone", "Crystal", "Golden", "Royal" }
+
+-- ===== Shell value table (mirrors CrabController u3) =====
+local SHELL_VALUE = {1}
+for v = 2, 28 do
+    SHELL_VALUE[v] = math.floor(SHELL_VALUE[v-1] * (1.25 / (v-1) + 3.75))
+end
+
+local MAX_SLOTS         = CrabTiers.MAX_SLOTS
+local BUY_TIER_CAP      = CrabTiers.BUY_TIER_CAP
+local BUY_TIER_UPGRADES = CrabTiers.BUY_TIER_UPGRADES
+
+-- ===== State helpers =====
+local function get(k) local ok, v = pcall(function() return Mirror.get(k) end) return ok and v or nil end
+
+local function crabCounts()
+    local tiers = get("crabTiers") or {}
+    local byTier, n = {}, #tiers
+    for _, t in tiers do byTier[t] = (byTier[t] or 0) + 1 end
+    return n, byTier
+end
+
+local function buyCost(amount)
+    local power   = get("crabPower") or 0
+    local buyTier = get("buyTier") or 1
+    local mult    = 3 ^ (buyTier - 1)
+    local base    = (power <= 0) and 5 or math.floor(5 + 2.1 * power ^ 0.875)
+    return base * amount * mult
+end
+
+-- ===== Feature flags =====
+local F = {
+    collectShells = false,
+    depositShells = false,
+    collectCash   = false,
+    buyCrabs      = false,
+    mergeCrabs    = false,
+    upgradeTier   = false,
+    upgradeAppr   = false,
+    antiAfk       = true,   -- default ON: blocks the 20-min idle kick
+    unlockSift    = false,  -- sifting: auto-unlock when power+cash met
+    collectSand   = false,  -- sifting: auto-collect sand mounds
+    autoSift      = false,  -- sifting: auto-sift sand into rewards
+    eggIncubator  = false,  -- auto collect/incubate/claim eggs (filtered)
+}
+-- which buy amounts Auto Buy Crabs is allowed to purchase (biggest enabled first)
+local buyAmounts = { [1] = true, [5] = true, [25] = true, [100] = true }
+-- which egg TYPES (1..7) are allowed into the incubator
+local eggFilter = {}
+for i = 1, 7 do eggFilter[i] = true end
+
+-- ===== Anti-AFK (VirtualUser idle hook) =====
+pcall(function()
+    LocalPlayer.Idled:Connect(function()
+        if not F.antiAfk then return end
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end)
+local keepBuffer = 0   -- reserve cash so upgrades don't starve crab buying (set via toggle)
+
+-- ===== Feature implementations =====
+local function doCollectShells()
+    local fired = 0
+    for _, d in workspace:GetDescendants() do
+        if d.Name == "RollSphere" and not d:GetAttribute("Collected") then
+            local tier = d:GetAttribute("Tier") or 1
+            local val  = (SHELL_VALUE[tier] or 1) * (d:GetAttribute("Big") and 10 or 1)
+                        + (d:GetAttribute("BonusValue") or 0)
+            R.CollectShells:FireServer(val)
+            d:SetAttribute("Collected", true)
+            -- remove the visual so shells don't linger in the water (mirrors CrabController u63)
+            local weld = d:FindFirstChildOfClass("WeldConstraint")
+            local visual = weld and weld.Part1
+            pcall(function() d:Destroy() end)
+            if visual and visual.Parent then
+                pcall(function()
+                    if visual.Parent ~= workspace then visual.Parent:Destroy()
+                    else visual:Destroy() end
+                end)
+            end
+            fired += 1
+        end
+    end
+    return fired
+end
+
+local function doDepositShells()
+    if (get("heldShells") or 0) > 0 then R.DepositShells:FireServer() end
+end
+
+local function doCollectCash()
+    if (get("pendingCash") or 0) > 0 then R.CollectCash:FireServer() end
+end
+
+local function doBuyCrabs()
+    local n = crabCounts()
+    if n >= MAX_SLOTS then return end
+    local cash = get("cash") or 0
+    for _, amt in ipairs({100, 25, 5, 1}) do
+        if buyAmounts[amt] and cash >= buyCost(amt) then
+            R.BuyCrab:FireServer(amt)
+            return
+        end
+    end
+end
+
+local function doMergeCrabs()
+    local _, byTier = crabCounts()
+    for _, c in byTier do
+        if c >= 3 then R.MergeCrab:FireServer() return end
+    end
+end
+
+local function doUpgradeTier()
+    local next = (get("buyTier") or 1) + 1
+    if next > BUY_TIER_CAP then return end
+    local upg = BUY_TIER_UPGRADES[next]
+    if not upg then return end
+    if (get("crabPower") or 0) >= upg.gate and (get("cash") or 0) >= upg.cost then
+        R.UpgradeBuyTier:FireServer()
+    end
+end
+
+local function doUpgradeAppraisal()
+    local lvl  = get("processingLevel") or 1
+    local ok, cost = pcall(function() return Formulas.GetProcessingUpgradeCost(lvl) end)
+    if ok and cost and (get("cash") or 0) >= cost then
+        R.UpgradeProcessing:FireServer()
+    end
+end
+
+-- ===== Digging anti-lock =====
+-- CrabController throttles/stops digging when its internal live-shell counter (u4)
+-- reaches ~100 and trips a lock flag (u7). Those only decrement through the game's
+-- own collect path, which we bypass when AFK -> the counter climbs and crabs stop
+-- digging after a few minutes. We locate that closure and clamp the counter so the
+-- crabs keep digging forever. (Indices from the decompiled DescendantAdded handler:
+--  7=collect fn, 8=u4 counter, 9=u7 lock.)
+local U4_IDX, U7_IDX = 8, 9
+local crabHandler
+local function findCrabHandler()
+    if crabHandler then return crabHandler end
+    if not (getconnections and debug and debug.getupvalues and debug.setupvalue) then return nil end
+    local ok, conns = pcall(getconnections, workspace.DescendantAdded)
+    if not ok then return nil end
+    for _, c in conns do
+        local f = c.Function
+        if f then
+            local ok2, ups = pcall(debug.getupvalues, f)
+            if ok2 and type(ups[U4_IDX]) == "number"
+                    and type(ups[U7_IDX]) == "boolean"
+                    and type(ups[7]) == "function" then
+                crabHandler = f
+                return f
+            end
+        end
+    end
+    return nil
+end
+local function unlockDigging()
+    local f = findCrabHandler()
+    if not f then return end
+    pcall(function()
+        if (debug.getupvalue(f, U4_IDX) or 0) > 0 then debug.setupvalue(f, U4_IDX, 0) end
+        if debug.getupvalue(f, U7_IDX) then debug.setupvalue(f, U7_IDX, false) end
+    end)
+end
+unlockDigging()  -- clear any lock that's already in effect on load
+
+-- ===== Sifting (sand minigame) automation =====
+-- Unlock needs crabPower >= 2000 AND cash >= $1,000,000.
+local function doUnlockSifting()
+    if get("siftingUnlocked") then return end
+    if (get("crabPower") or 0) >= 2000 and (get("cash") or 0) >= 1000000 then
+        R.UnlockSifting:FireServer()
+    end
+end
+
+-- Sand mounds live in SandController's local registry `u1` ({id = {part,pos,amount}}).
+-- We read it from the SpawnSand.OnClientEvent handler's upvalues, then fire
+-- CollectSand(id) directly (server does not require proximity - verified).
+local sandReg
+local function findSandRegistry()
+    if sandReg then return sandReg end
+    if not (getconnections and debug and debug.getupvalues) then return nil end
+    local sp = Remotes:FindFirstChild("SpawnSand")
+    if not sp then return nil end
+    local ok, conns = pcall(getconnections, sp.OnClientEvent)
+    if not ok then return nil end
+    for _, c in conns do
+        local f = c.Function
+        if f then
+            local ok2, ups = pcall(debug.getupvalues, f)
+            if ok2 then
+                for _, v in pairs(ups) do
+                    if type(v) == "table" then
+                        for _, e in pairs(v) do
+                            if type(e) == "table" and e.pos ~= nil and e.amount ~= nil then
+                                sandReg = v
+                                return v
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function doCollectSand()
+    if not get("siftingUnlocked") then return end
+    local reg = findSandRegistry()
+    if not reg then return end
+    local ids = {}
+    for id in pairs(reg) do ids[#ids + 1] = id end
+    for _, id in ipairs(ids) do
+        local e = reg[id]
+        if e then
+            R.CollectSand:FireServer(id)
+            if e.part and e.part.Parent then pcall(function() e.part:Destroy() end) end
+            reg[id] = nil
+        end
+    end
+end
+
+local function doSift()
+    if not get("siftingUnlocked") then return end
+    if (get("heldSand") or 0) > 0 then
+        R.RequestSift:FireServer()
+    end
+end
+
+-- ===== Egg incubator automation (filtered by egg type) =====
+-- Flow: collect a ground egg of an ENABLED type (sets heldEggType) -> place it
+-- in a free incubator slot -> claim it when the timer is done (gives a crab).
+-- Only egg types toggled on in eggFilter ever enter the incubator.
+local INC_DUR  = EggConfig.INCUBATE_DURATION or 86400        -- 24h
+local QINC_DUR = EggConfig.QUICK_INCUBATE_DURATION or 28800  -- 8h (gamepass)
+
+local function findGroundEggEnabled()
+    local bestT, bestPart
+    for _, d in workspace:GetDescendants() do
+        if d.Name == "EggSphere" then
+            local t = d:GetAttribute("EggType")
+            if t and eggFilter[t] and (not bestT or t > bestT) then
+                bestT, bestPart = t, d  -- prefer the rarest (highest type) enabled egg
+            end
+        end
+    end
+    return bestT, bestPart
+end
+
+local function doEggIncubator()
+    local n = crabCounts()
+    local hasQuick = LocalPlayer:GetAttribute("QuickIncubator") and true or false
+
+    -- 1) claim finished incubators (gives a crab; needs a free crab slot)
+    local incType = get("incubatingEggType") or 0
+    if incType > 0 and (os.time() - (get("incubateStartTime") or 0)) >= INC_DUR then
+        if n < MAX_SLOTS then R.ClaimIncubator:FireServer() end
+        return
+    end
+    if hasQuick then
+        local qType = get("quickIncEggType") or 0
+        if qType > 0 and (os.time() - (get("quickIncStartTime") or 0)) >= QINC_DUR then
+            if n < MAX_SLOTS then R.ClaimQuickIncubator:FireServer() end
+            return
+        end
+    end
+
+    -- 2) place an egg into a free slot
+    local normalFree = (get("incubatingEggType") or 0) == 0
+    local quickFree  = hasQuick and (get("quickIncEggType") or 0) == 0
+    if not (normalFree or quickFree) then return end
+
+    local held = get("heldEggType") or 0
+    if held > 0 then
+        if eggFilter[held] then
+            if normalFree then R.IncubateEgg:FireServer()
+            elseif quickFree then R.QuickIncubateEgg:FireServer() end
+        end
+        -- a held egg of a disabled type is left untouched
+    else
+        local t, part = findGroundEggEnabled()
+        if t then
+            R.CollectEgg:FireServer(t)
+            if part then
+                local weld = part:FindFirstChildOfClass("WeldConstraint")
+                local vis = weld and weld.Part1
+                pcall(function() part:Destroy() end)
+                if vis and vis.Parent then pcall(function() vis:Destroy() end) end
+            end
+        end
+    end
+end
+
+-- ===== Main loops (separate cadence so collect stays snappy) =====
+local lastUnlock = 0
+task.spawn(function()  -- fast loop: shells + cash
+    while alive() do
+        pcall(function()
+            if F.collectShells then
+                doCollectShells()
+                if os.clock() - lastUnlock > 1.5 then  -- keep crabs digging
+                    unlockDigging()
+                    lastUnlock = os.clock()
+                end
+            end
+            if F.depositShells then doDepositShells() end
+            if F.collectCash   then doCollectCash()   end
+            if F.collectSand   then doCollectSand()   end
+        end)
+        task.wait(0.25)
+    end
+end)
+
+task.spawn(function()  -- slow loop: spending (buy/merge/upgrade)
+    while alive() do
+        pcall(function()
+            if F.mergeCrabs  then doMergeCrabs()      end
+            if F.upgradeTier then doUpgradeTier()     end
+            if F.upgradeAppr then doUpgradeAppraisal()end
+            if F.buyCrabs    then doBuyCrabs()         end
+            if F.unlockSift  then doUnlockSifting()    end
+            if F.autoSift    then doSift()             end
+            if F.eggIncubator then doEggIncubator()    end
+        end)
+        task.wait(0.6)
+    end
+end)
+
+-- =====================================================================
+--  GUI  -  Hudas Hub  (red & black)
+-- =====================================================================
+local COL = {
+    bg      = Color3.fromRGB(15, 15, 17),
+    panel   = Color3.fromRGB(22, 22, 26),
+    red     = Color3.fromRGB(200, 30, 40),
+    redDim  = Color3.fromRGB(60, 22, 26),
+    on      = Color3.fromRGB(220, 40, 50),
+    off     = Color3.fromRGB(45, 45, 52),
+    text    = Color3.fromRGB(235, 235, 240),
+    sub     = Color3.fromRGB(150, 150, 160),
+    accent  = Color3.fromRGB(255, 70, 80),
+}
+
+-- clean up any previous instance
+pcall(function()
+    local prev = (gethui and gethui() or game:GetService("CoreGui")):FindFirstChild("HudasHub_CrabTycoon")
+    if prev then prev:Destroy() end
+end)
+
+local guiParent = (gethui and gethui()) or game:GetService("CoreGui")
+local screen = Instance.new("ScreenGui")
+screen.Name = "HudasHub_CrabTycoon"
+screen.ResetOnSpawn = false
+screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screen.Parent = guiParent
+
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(500, 512)
+main.Position = UDim2.fromScale(0.58, 0.10)
+main.BackgroundColor3 = COL.bg
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = screen
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+local stroke = Instance.new("UIStroke", main)
+stroke.Color = COL.red
+stroke.Thickness = 1.5
+stroke.Transparency = 0.2
+
+-- ===== Responsive scaling (adapts to any device / resolution) =====
+local DESIGN_W, DESIGN_H = 500, 512
+local camera = workspace.CurrentCamera
+local minimized = false
+local fab  -- floating circular toggle button (created later)
+local uiScale = Instance.new("UIScale")
+uiScale.Parent = main
+
+-- design-space height clamped so the scaled panel never overflows the screen
+local function responsiveHeight()
+    local vp = camera and camera.ViewportSize
+    if not vp or vp.Y < 1 then return DESIGN_H end
+    local s = uiScale.Scale > 0 and uiScale.Scale or 1
+    return math.min(DESIGN_H, (vp.Y * 0.9) / s)
+end
+
+local function applyResponsive()
+    local vp = camera and camera.ViewportSize
+    if not vp or vp.X < 1 or vp.Y < 1 then return end
+    -- scale relative to a 1366x768 baseline; smaller on phones, capped on huge screens
+    local scale = math.clamp(math.min(vp.X / 1366, vp.Y / 768), 0.5, 1.2)
+    uiScale.Scale = scale
+    if not minimized then
+        main.Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())
+    end
+    -- keep the panel fully on-screen (using the scaled pixel footprint)
+    local pxW = DESIGN_W * scale
+    local pxH = (minimized and 46 or responsiveHeight()) * scale
+    if main.AbsoluteSize.X > 0 then
+        local ap = main.AbsolutePosition
+        local x = math.clamp(ap.X, 0, math.max(0, vp.X - pxW))
+        local y = math.clamp(ap.Y, 0, math.max(0, vp.Y - pxH))
+        main.Position = UDim2.fromOffset(x, y)
+    end
+    -- scale + clamp the floating toggle button too
+    if fab then
+        local fs = math.floor(54 * scale)
+        fab.Size = UDim2.fromOffset(fs, fs)
+        if fab.AbsoluteSize.X > 0 then
+            local fp = fab.AbsolutePosition
+            fab.Position = UDim2.fromOffset(
+                math.clamp(fp.X, 0, math.max(0, vp.X - fs)),
+                math.clamp(fp.Y, 0, math.max(0, vp.Y - fs)))
+        end
+    end
+end
+
+-- Title bar
+local bar = Instance.new("Frame")
+bar.Size = UDim2.new(1, 0, 0, 46)
+bar.BackgroundColor3 = COL.panel
+bar.BorderSizePixel = 0
+bar.Parent = main
+Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 10)
+local barFix = Instance.new("Frame")
+barFix.Size = UDim2.new(1, 0, 0, 12)
+barFix.Position = UDim2.new(0, 0, 1, -12)
+barFix.BackgroundColor3 = COL.panel
+barFix.BorderSizePixel = 0
+barFix.Parent = bar
+
+local accentLine = Instance.new("Frame")
+accentLine.Size = UDim2.new(1, 0, 0, 2)
+accentLine.Position = UDim2.new(0, 0, 1, -2)
+accentLine.BackgroundColor3 = COL.red
+accentLine.BorderSizePixel = 0
+accentLine.Parent = bar
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 0, 22)
+title.Position = UDim2.fromOffset(14, 6)
+title.BackgroundTransparency = 1
+title.Font = Enum.Font.GothamBlack
+title.Text = "HUDAS HUB"
+title.TextColor3 = COL.accent
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.TextSize = 18
+title.Parent = bar
+
+local subtitle = Instance.new("TextLabel")
+subtitle.Size = UDim2.new(1, -20, 0, 14)
+subtitle.Position = UDim2.fromOffset(14, 27)
+subtitle.BackgroundTransparency = 1
+subtitle.Font = Enum.Font.GothamMedium
+subtitle.Text = "Crab Tycoon  •  Auto-Farm"
+subtitle.TextColor3 = COL.sub
+subtitle.TextXAlignment = Enum.TextXAlignment.Left
+subtitle.TextSize = 11
+subtitle.Parent = bar
+
+-- Stats panel
+local stats = Instance.new("TextLabel")
+stats.Size = UDim2.new(1, -24, 0, 56)
+stats.Position = UDim2.fromOffset(12, 54)
+stats.BackgroundColor3 = COL.panel
+stats.BorderSizePixel = 0
+stats.Font = Enum.Font.Code
+stats.TextColor3 = COL.text
+stats.TextXAlignment = Enum.TextXAlignment.Left
+stats.TextYAlignment = Enum.TextYAlignment.Top
+stats.TextSize = 11
+stats.Text = ""
+stats.Parent = main
+Instance.new("UICorner", stats).CornerRadius = UDim.new(0, 6)
+local statsPad = Instance.new("UIPadding", stats)
+statsPad.PaddingLeft = UDim.new(0, 8)
+statsPad.PaddingTop  = UDim.new(0, 6)
+
+-- Body: scrollable container holding the columns + eggs row + profiles
+local controls = {}   -- key -> { get=fn, set=fn }  used by profile save/load
+local list = Instance.new("ScrollingFrame")
+list.Size = UDim2.new(1, -18, 1, -128)
+list.Position = UDim2.fromOffset(12, 118)
+list.BackgroundTransparency = 1
+list.BorderSizePixel = 0
+list.ScrollBarThickness = 4
+list.ScrollBarImageColor3 = COL.red
+list.CanvasSize = UDim2.new()
+list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+list.Parent = main
+local listLayout = Instance.new("UIListLayout", list)
+listLayout.Padding = UDim.new(0, 8)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- shared toggle builder, parented into any container
+local function makeToggle(label, flagKey, parent, order)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 32)
+    btn.BackgroundColor3 = COL.off
+    btn.AutoButtonColor = false
+    btn.Text = ""
+    btn.LayoutOrder = order or 0
+    btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    local bs = Instance.new("UIStroke", btn)
+    bs.Color = COL.red
+    bs.Transparency = 0.6
+    bs.Thickness = 1
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -46, 1, 0)
+    lbl.Position = UDim2.fromOffset(10, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = Enum.Font.GothamMedium
+    lbl.Text = label
+    lbl.TextColor3 = COL.text
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextSize = 12
+    lbl.TextTruncate = Enum.TextTruncate.AtEnd
+    lbl.Parent = btn
+
+    local pill = Instance.new("Frame")
+    pill.Size = UDim2.fromOffset(34, 18)
+    pill.Position = UDim2.new(1, -40, 0.5, -9)
+    pill.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    pill.Parent = btn
+    Instance.new("UICorner", pill).CornerRadius = UDim.new(1, 0)
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.fromOffset(14, 14)
+    knob.Position = UDim2.fromOffset(2, 2)
+    knob.BackgroundColor3 = Color3.fromRGB(120, 120, 130)
+    knob.Parent = pill
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local function render()
+        local on = F[flagKey]
+        knob:TweenPosition(UDim2.fromOffset(on and 18 or 2, 2), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.12, true)
+        pill.BackgroundColor3 = on and COL.on or Color3.fromRGB(35, 35, 40)
+        knob.BackgroundColor3 = on and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(120, 120, 130)
+        btn.BackgroundColor3 = on and COL.redDim or COL.off
+        bs.Transparency = on and 0.1 or 0.6
+    end
+    btn.MouseButton1Click:Connect(function()
+        F[flagKey] = not F[flagKey]
+        render()
+    end)
+    controls[flagKey] = {
+        get = function() return F[flagKey] end,
+        set = function(v) F[flagKey] = v and true or false; render() end,
+    }
+    render()
+    return btn
+end
+
+-- generic chip builder (toggles a value in a state table, registers under a key)
+local function makeChip(parent, text, stateTbl, stateKey, ctrlKey, order, widthUDim)
+    local chip = Instance.new("TextButton")
+    chip.Size = widthUDim
+    chip.AutoButtonColor = false
+    chip.Font = Enum.Font.GothamBold
+    chip.TextSize = 11
+    chip.Text = text
+    chip.LayoutOrder = order
+    chip.Parent = parent
+    Instance.new("UICorner", chip).CornerRadius = UDim.new(0, 6)
+    local cs = Instance.new("UIStroke", chip)
+    cs.Color = COL.red
+    cs.Thickness = 1
+    local function render()
+        local on = stateTbl[stateKey]
+        chip.BackgroundColor3 = on and COL.on or Color3.fromRGB(35, 35, 40)
+        chip.TextColor3 = on and Color3.fromRGB(255, 255, 255) or COL.sub
+        cs.Transparency = on and 0.1 or 0.7
+    end
+    chip.MouseButton1Click:Connect(function()
+        stateTbl[stateKey] = not stateTbl[stateKey]
+        render()
+    end)
+    controls[ctrlKey] = {
+        get = function() return stateTbl[stateKey] end,
+        set = function(v) stateTbl[stateKey] = v and true or false; render() end,
+    }
+    render()
+end
+
+-- builds a labelled vertical column inside the columns row
+local function makeColumn(parent, title, order)
+    local col = Instance.new("Frame")
+    col.Size = UDim2.new(1/3, -6, 0, 0)
+    col.AutomaticSize = Enum.AutomaticSize.Y
+    col.BackgroundTransparency = 1
+    col.LayoutOrder = order
+    col.Parent = parent
+    local cl = Instance.new("UIListLayout", col)
+    cl.Padding = UDim.new(0, 5)
+    cl.SortOrder = Enum.SortOrder.LayoutOrder
+    local h = Instance.new("TextLabel")
+    h.Size = UDim2.new(1, 0, 0, 16)
+    h.BackgroundTransparency = 1
+    h.Font = Enum.Font.GothamBold
+    h.Text = title
+    h.TextColor3 = COL.accent
+    h.TextXAlignment = Enum.TextXAlignment.Left
+    h.TextSize = 11
+    h.LayoutOrder = 0
+    h.Parent = col
+    return col
+end
+
+-- ===== three category columns (side by side) =====
+local columnsRow = Instance.new("Frame")
+columnsRow.Size = UDim2.new(1, 0, 0, 0)
+columnsRow.AutomaticSize = Enum.AutomaticSize.Y
+columnsRow.BackgroundTransparency = 1
+columnsRow.LayoutOrder = 1
+columnsRow.Parent = list
+local crl = Instance.new("UIListLayout", columnsRow)
+crl.FillDirection = Enum.FillDirection.Horizontal
+crl.Padding = UDim.new(0, 8)
+crl.SortOrder = Enum.SortOrder.LayoutOrder
+crl.VerticalAlignment = Enum.VerticalAlignment.Top
+
+-- Column 1: shells -> cash pipeline + misc
+local col1 = makeColumn(columnsRow, "SHELLS & CASH", 1)
+makeToggle("Collect Shells",    "collectShells", col1, 1)
+makeToggle("Deposit Shells",    "depositShells", col1, 2)
+makeToggle("Collect Cash",      "collectCash",   col1, 3)
+makeToggle("Upgrade Appraisal", "upgradeAppr",   col1, 4)
+makeToggle("Anti-AFK",          "antiAfk",       col1, 5)
+
+-- Column 2: crabs
+local col2 = makeColumn(columnsRow, "CRABS", 2)
+makeToggle("Buy Crabs", "buyCrabs", col2, 1)
+do
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 24)
+    row.BackgroundTransparency = 1
+    row.LayoutOrder = 2
+    row.Parent = col2
+    local rl = Instance.new("UIListLayout", row)
+    rl.FillDirection = Enum.FillDirection.Horizontal
+    rl.Padding = UDim.new(0, 4)
+    rl.SortOrder = Enum.SortOrder.LayoutOrder
+    local cw = UDim2.new(0.25, -3, 1, 0)
+    makeChip(row, "+1",   buyAmounts, 1,   "buy1",   1, cw)
+    makeChip(row, "+5",   buyAmounts, 5,   "buy5",   2, cw)
+    makeChip(row, "+25",  buyAmounts, 25,  "buy25",  3, cw)
+    makeChip(row, "+100", buyAmounts, 100, "buy100", 4, cw)
+end
+makeToggle("Merge Crabs",     "mergeCrabs",  col2, 3)
+makeToggle("Upgrade Buy Tier","upgradeTier", col2, 4)
+
+-- Column 3: sifting
+local col3 = makeColumn(columnsRow, "SIFTING", 3)
+makeToggle("Unlock Sifting", "unlockSift",  col3, 1)
+makeToggle("Collect Sand",   "collectSand", col3, 2)
+makeToggle("Sift",           "autoSift",    col3, 3)
+
+-- ===== eggs row (full width) =====
+local eggWrap = Instance.new("Frame")
+eggWrap.Size = UDim2.new(1, 0, 0, 0)
+eggWrap.AutomaticSize = Enum.AutomaticSize.Y
+eggWrap.BackgroundTransparency = 1
+eggWrap.LayoutOrder = 2
+eggWrap.Parent = list
+local ewl = Instance.new("UIListLayout", eggWrap)
+ewl.Padding = UDim.new(0, 5)
+ewl.SortOrder = Enum.SortOrder.LayoutOrder
+
+do
+    local eDiv = Instance.new("Frame")
+    eDiv.Size = UDim2.new(1, 0, 0, 1)
+    eDiv.BackgroundColor3 = COL.red
+    eDiv.BackgroundTransparency = 0.4
+    eDiv.BorderSizePixel = 0
+    eDiv.LayoutOrder = 1
+    eDiv.Parent = eggWrap
+    local eHeader = Instance.new("TextLabel")
+    eHeader.Size = UDim2.new(1, 0, 0, 16)
+    eHeader.BackgroundTransparency = 1
+    eHeader.Font = Enum.Font.GothamBold
+    eHeader.Text = "EGGS"
+    eHeader.TextColor3 = COL.accent
+    eHeader.TextXAlignment = Enum.TextXAlignment.Left
+    eHeader.TextSize = 11
+    eHeader.LayoutOrder = 2
+    eHeader.Parent = eggWrap
+end
+makeToggle("Auto Egg Incubator", "eggIncubator", eggWrap, 3)
+do
+    local cap = Instance.new("TextLabel")
+    cap.Size = UDim2.new(1, 0, 0, 14)
+    cap.BackgroundTransparency = 1
+    cap.Font = Enum.Font.GothamMedium
+    cap.Text = "Egg types allowed into incubator:"
+    cap.TextColor3 = COL.sub
+    cap.TextXAlignment = Enum.TextXAlignment.Left
+    cap.TextSize = 11
+    cap.LayoutOrder = 4
+    cap.Parent = eggWrap
+
+    local chipsRow = Instance.new("Frame")
+    chipsRow.Size = UDim2.new(1, 0, 0, 24)
+    chipsRow.BackgroundTransparency = 1
+    chipsRow.LayoutOrder = 5
+    chipsRow.Parent = eggWrap
+    local crl2 = Instance.new("UIListLayout", chipsRow)
+    crl2.FillDirection = Enum.FillDirection.Horizontal
+    crl2.Padding = UDim.new(0, 4)
+    crl2.SortOrder = Enum.SortOrder.LayoutOrder
+    local ew = UDim2.new(1/7, -4, 1, 0)
+    for i = 1, 7 do
+        makeChip(chipsRow, EGG_NAMES[i], eggFilter, i, "egg" .. i, i, ew)
+    end
+end
+
+-- ===== PROFILES (save / load configs) =====
+local HttpService = game:GetService("HttpService")
+local PFOLDER = "HudasHub_CrabTycoon_Profiles"
+local hasFiles = (writefile and readfile and listfiles and isfolder and makefolder and delfile) and true or false
+
+local function ensureFolder() if hasFiles and not isfolder(PFOLDER) then pcall(makefolder, PFOLDER) end end
+local function ppath(n) return PFOLDER .. "/" .. n .. ".json" end
+local function listProfiles()
+    local out = {}
+    if not hasFiles or not isfolder(PFOLDER) then return out end
+    local ok, files = pcall(listfiles, PFOLDER)
+    if ok then
+        for _, f in ipairs(files) do
+            local nm = f:match("([^/\\]+)%.json$")
+            if nm then table.insert(out, nm) end
+        end
+    end
+    return out
+end
+local function saveProfile(n)
+    if not hasFiles or n == "" then return false end
+    ensureFolder()
+    local data = {}
+    for k, c in pairs(controls) do
+        local ok, v = pcall(c.get)
+        if ok then data[k] = v end
+    end
+    return (pcall(function() writefile(ppath(n), HttpService:JSONEncode(data)) end))
+end
+local function applyProfile(n)
+    if not hasFiles then return false end
+    local ok, raw = pcall(readfile, ppath(n))
+    if not ok then return false end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok2 or type(data) ~= "table" then return false end
+    for k, v in pairs(data) do
+        if controls[k] then pcall(controls[k].set, v) end
+    end
+    return true
+end
+
+local profWrap = Instance.new("Frame")
+profWrap.Size = UDim2.new(1, 0, 0, 0)
+profWrap.AutomaticSize = Enum.AutomaticSize.Y
+profWrap.BackgroundTransparency = 1
+profWrap.LayoutOrder = 20
+profWrap.Parent = list
+local pwl = Instance.new("UIListLayout", profWrap)
+pwl.Padding = UDim.new(0, 6)
+pwl.SortOrder = Enum.SortOrder.LayoutOrder
+
+local pDivider = Instance.new("Frame")
+pDivider.Size = UDim2.new(1, 0, 0, 1)
+pDivider.BackgroundColor3 = COL.red
+pDivider.BackgroundTransparency = 0.4
+pDivider.BorderSizePixel = 0
+pDivider.LayoutOrder = 1
+pDivider.Parent = profWrap
+
+local pHeader = Instance.new("TextLabel")
+pHeader.Size = UDim2.new(1, 0, 0, 18)
+pHeader.BackgroundTransparency = 1
+pHeader.Font = Enum.Font.GothamBold
+pHeader.Text = "PROFILES"
+pHeader.TextColor3 = COL.accent
+pHeader.TextXAlignment = Enum.TextXAlignment.Left
+pHeader.TextSize = 12
+pHeader.LayoutOrder = 2
+pHeader.Parent = profWrap
+
+if not hasFiles then
+    local warnLbl = Instance.new("TextLabel")
+    warnLbl.Size = UDim2.new(1, 0, 0, 16)
+    warnLbl.BackgroundTransparency = 1
+    warnLbl.Font = Enum.Font.Gotham
+    warnLbl.Text = "Executor has no file API"
+    warnLbl.TextColor3 = COL.sub
+    warnLbl.TextXAlignment = Enum.TextXAlignment.Left
+    warnLbl.TextSize = 11
+    warnLbl.LayoutOrder = 3
+    warnLbl.Parent = profWrap
+else
+    -- ----- Create row: name box + Create -----
+    local inputRow = Instance.new("Frame")
+    inputRow.Size = UDim2.new(1, 0, 0, 30)
+    inputRow.BackgroundTransparency = 1
+    inputRow.LayoutOrder = 3
+    inputRow.Parent = profWrap
+
+    local nameBox = Instance.new("TextBox")
+    nameBox.Size = UDim2.new(1, -74, 1, 0)
+    nameBox.BackgroundColor3 = COL.off
+    nameBox.Text = ""
+    nameBox.PlaceholderText = "new profile name..."
+    nameBox.PlaceholderColor3 = COL.sub
+    nameBox.Font = Enum.Font.Gotham
+    nameBox.TextColor3 = COL.text
+    nameBox.TextSize = 12
+    nameBox.ClearTextOnFocus = false
+    nameBox.Parent = inputRow
+    Instance.new("UICorner", nameBox).CornerRadius = UDim.new(0, 6)
+    local nbPad = Instance.new("UIPadding", nameBox)
+    nbPad.PaddingLeft = UDim.new(0, 8)
+    nbPad.PaddingRight = UDim.new(0, 8)
+
+    local createBtn = Instance.new("TextButton")
+    createBtn.Size = UDim2.new(0, 66, 1, 0)
+    createBtn.Position = UDim2.new(1, -66, 0, 0)
+    createBtn.BackgroundColor3 = COL.on
+    createBtn.Font = Enum.Font.GothamBold
+    createBtn.Text = "+ Create"
+    createBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    createBtn.TextSize = 12
+    createBtn.Parent = inputRow
+    Instance.new("UICorner", createBtn).CornerRadius = UDim.new(0, 6)
+
+    -- ----- Dropdown header -----
+    local selected = nil
+
+    local ddButton = Instance.new("TextButton")
+    ddButton.Size = UDim2.new(1, 0, 0, 28)
+    ddButton.BackgroundColor3 = COL.off
+    ddButton.AutoButtonColor = false
+    ddButton.Text = ""
+    ddButton.LayoutOrder = 4
+    ddButton.Parent = profWrap
+    Instance.new("UICorner", ddButton).CornerRadius = UDim.new(0, 6)
+    local ddStroke = Instance.new("UIStroke", ddButton)
+    ddStroke.Color = COL.red
+    ddStroke.Transparency = 0.5
+
+    local ddLabel = Instance.new("TextLabel")
+    ddLabel.Size = UDim2.new(1, -32, 1, 0)
+    ddLabel.Position = UDim2.fromOffset(10, 0)
+    ddLabel.BackgroundTransparency = 1
+    ddLabel.Font = Enum.Font.GothamMedium
+    ddLabel.Text = "Select profile..."
+    ddLabel.TextColor3 = COL.sub
+    ddLabel.TextXAlignment = Enum.TextXAlignment.Left
+    ddLabel.TextSize = 12
+    ddLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    ddLabel.Parent = ddButton
+
+    local ddArrow = Instance.new("TextLabel")
+    ddArrow.Size = UDim2.fromOffset(26, 28)
+    ddArrow.Position = UDim2.new(1, -28, 0, 0)
+    ddArrow.BackgroundTransparency = 1
+    ddArrow.Font = Enum.Font.GothamBold
+    ddArrow.Text = "v"
+    ddArrow.TextColor3 = COL.accent
+    ddArrow.TextSize = 12
+    ddArrow.Parent = ddButton
+
+    -- ----- Dropdown list (collapsible) -----
+    local ddList = Instance.new("Frame")
+    ddList.Size = UDim2.new(1, 0, 0, 0)
+    ddList.AutomaticSize = Enum.AutomaticSize.Y
+    ddList.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+    ddList.BorderSizePixel = 0
+    ddList.Visible = false
+    ddList.LayoutOrder = 5
+    ddList.Parent = profWrap
+    Instance.new("UICorner", ddList).CornerRadius = UDim.new(0, 6)
+    local ddll = Instance.new("UIListLayout", ddList)
+    ddll.Padding = UDim.new(0, 2)
+    ddll.SortOrder = Enum.SortOrder.LayoutOrder
+    local ddPad = Instance.new("UIPadding", ddList)
+    ddPad.PaddingTop = UDim.new(0, 3); ddPad.PaddingBottom = UDim.new(0, 3)
+    ddPad.PaddingLeft = UDim.new(0, 3); ddPad.PaddingRight = UDim.new(0, 3)
+
+    -- ----- Action row (acts on selected) -----
+    local actionRow = Instance.new("Frame")
+    actionRow.Size = UDim2.new(1, 0, 0, 28)
+    actionRow.BackgroundTransparency = 1
+    actionRow.Visible = false
+    actionRow.LayoutOrder = 6
+    actionRow.Parent = profWrap
+    local arl = Instance.new("UIListLayout", actionRow)
+    arl.FillDirection = Enum.FillDirection.Horizontal
+    arl.Padding = UDim.new(0, 6)
+    arl.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local function mkAction(txt, color, ord)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1/3, -4, 1, 0)
+        b.BackgroundColor3 = color
+        b.Font = Enum.Font.GothamBold
+        b.Text = txt
+        b.TextColor3 = Color3.fromRGB(255, 255, 255)
+        b.TextSize = 11
+        b.LayoutOrder = ord
+        b.Parent = actionRow
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        return b
+    end
+    local loadAct = mkAction("Load",      COL.on,                      1)
+    local owAct   = mkAction("Overwrite", Color3.fromRGB(150, 90, 30), 2)
+    local delAct  = mkAction("Delete",    Color3.fromRGB(90, 30, 34),  3)
+
+    -- ----- logic -----
+    local refreshOptions
+    local function setSelected(name)
+        selected = name
+        if name then
+            ddLabel.Text = name
+            ddLabel.TextColor3 = COL.text
+            actionRow.Visible = true
+        else
+            ddLabel.Text = "Select profile..."
+            ddLabel.TextColor3 = COL.sub
+            actionRow.Visible = false
+        end
+    end
+    local function closeDropdown()
+        ddList.Visible = false
+        ddArrow.Text = "v"
+    end
+    refreshOptions = function()
+        for _, ch in ipairs(ddList:GetChildren()) do
+            if ch:IsA("TextButton") or ch:IsA("TextLabel") then ch:Destroy() end
+        end
+        local names = listProfiles()
+        if #names == 0 then
+            local empty = Instance.new("TextLabel")
+            empty.Size = UDim2.new(1, 0, 0, 22)
+            empty.BackgroundTransparency = 1
+            empty.Font = Enum.Font.Gotham
+            empty.Text = "(no profiles yet)"
+            empty.TextColor3 = COL.sub
+            empty.TextSize = 11
+            empty.Parent = ddList
+        else
+            for i, nm in ipairs(names) do
+                local opt = Instance.new("TextButton")
+                opt.Size = UDim2.new(1, 0, 0, 24)
+                opt.BackgroundColor3 = COL.off
+                opt.AutoButtonColor = true
+                opt.Font = Enum.Font.Gotham
+                opt.Text = "  " .. nm
+                opt.TextXAlignment = Enum.TextXAlignment.Left
+                opt.TextColor3 = COL.text
+                opt.TextSize = 12
+                opt.LayoutOrder = i
+                opt.Parent = ddList
+                Instance.new("UICorner", opt).CornerRadius = UDim.new(0, 5)
+                opt.MouseButton1Click:Connect(function()
+                    setSelected(nm)
+                    closeDropdown()
+                end)
+            end
+        end
+        if selected then
+            local found = false
+            for _, nm in ipairs(names) do if nm == selected then found = true break end end
+            if not found then setSelected(nil) end
+        end
+    end
+
+    ddButton.MouseButton1Click:Connect(function()
+        ddList.Visible = not ddList.Visible
+        ddArrow.Text = ddList.Visible and "^" or "v"
+        if ddList.Visible then refreshOptions() end
+    end)
+
+    createBtn.MouseButton1Click:Connect(function()
+        local nm = (nameBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if nm == "" then return end
+        if saveProfile(nm) then
+            nameBox.Text = ""
+            refreshOptions()
+            setSelected(nm)
+        end
+    end)
+
+    loadAct.MouseButton1Click:Connect(function()
+        if selected then applyProfile(selected) end
+    end)
+    owAct.MouseButton1Click:Connect(function()
+        if selected then saveProfile(selected) end
+    end)
+    delAct.MouseButton1Click:Connect(function()
+        if selected then
+            pcall(delfile, ppath(selected))
+            setSelected(nil)
+            refreshOptions()
+        end
+    end)
+
+    refreshOptions()
+end
+
+-- footer credit
+local credit = Instance.new("TextLabel")
+credit.Size = UDim2.new(1, 0, 0, 16)
+credit.Position = UDim2.new(0, 0, 1, -18)
+credit.BackgroundTransparency = 1
+credit.Font = Enum.Font.GothamMedium
+credit.Text = "© Hudas Hub"
+credit.TextColor3 = COL.sub
+credit.TextSize = 10
+credit.Parent = main
+
+-- ===== Stats updater =====
+local function fmt(n)
+    n = math.floor(n or 0)
+    if n >= 1e12 then return string.format("%.2fT", n/1e12)
+    elseif n >= 1e9 then return string.format("%.2fB", n/1e9)
+    elseif n >= 1e6 then return string.format("%.2fM", n/1e6)
+    elseif n >= 1e3 then return string.format("%.2fK", n/1e3)
+    else return tostring(n) end
+end
+task.spawn(function()
+    while alive() do
+        local n = crabCounts()
+        stats.Text = string.format(
+            "Cash: $%s   Tier: %d\nCrabs: %d / %d   Power: %s\nProcessing: %s   Pending: $%s",
+            fmt(get("cash")), get("buyTier") or 1,
+            n, MAX_SLOTS, fmt(get("crabPower")),
+            fmt(get("processingShells")), fmt(get("pendingCash"))
+        )
+        task.wait(0.4)
+    end
+end)
+
+-- ===== Floating toggle button (circular, draggable) =====
+-- To use your own logo: set LOGO_ASSET to a "rbxassetid://..." string, OR save
+-- the image as "HudasHub_Logo.png" in your executor's workspace folder.
+local LOGO_ASSET = ""
+local function resolveLogo()
+    if LOGO_ASSET ~= "" then return LOGO_ASSET end
+    local ok, id = pcall(function()
+        if getcustomasset and isfile and isfile("HudasHub_Logo.png") then
+            return getcustomasset("HudasHub_Logo.png")
+        end
+    end)
+    if ok and type(id) == "string" then return id end
+    return nil
+end
+
+fab = Instance.new("TextButton")
+fab.Name = "Toggle"
+fab.Size = UDim2.fromOffset(54, 54)
+fab.Position = UDim2.fromScale(0.03, 0.42)
+fab.BackgroundColor3 = COL.bg
+fab.AutoButtonColor = false
+fab.Text = ""
+fab.Active = true
+fab.ZIndex = 20
+fab.Parent = screen
+Instance.new("UICorner", fab).CornerRadius = UDim.new(1, 0)
+local fabRing = Instance.new("UIStroke", fab)
+fabRing.Color = Color3.fromRGB(235, 70, 50)
+fabRing.Thickness = 2.5
+fabRing.Transparency = 0.05
+
+do
+    local logoId = resolveLogo()
+    if logoId then
+        local logo = Instance.new("ImageLabel")
+        logo.Size = UDim2.fromScale(0.84, 0.84)
+        logo.Position = UDim2.fromScale(0.08, 0.08)
+        logo.BackgroundTransparency = 1
+        logo.Image = logoId
+        logo.ZIndex = 21
+        logo.Parent = fab
+        Instance.new("UICorner", logo).CornerRadius = UDim.new(1, 0)
+    else
+        local t = Instance.new("TextLabel")
+        t.Size = UDim2.fromScale(1, 1)
+        t.BackgroundTransparency = 1
+        t.Font = Enum.Font.GothamBlack
+        t.Text = "HH"
+        t.TextColor3 = COL.accent
+        t.TextSize = 20
+        t.ZIndex = 21
+        t.Parent = fab
+    end
+end
+
+-- tap = show/hide the menu; drag to reposition (a small move threshold tells them apart)
+do
+    local dragging, moved, startInput, startPos
+    fab.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; moved = false; startInput = i.Position; startPos = fab.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - startInput
+            if math.abs(d.X) + math.abs(d.Y) > 6 then moved = true end
+            fab.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            if not moved then main.Visible = not main.Visible end
+            applyResponsive()
+        end
+    end)
+end
+
+do  -- panel dragging (via title bar)
+    local dragging, dragStart, startPos
+    bar.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; dragStart = i.Position; startPos = main.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            if dragging then dragging = false; applyResponsive() end  -- snap back on-screen
+        end
+    end)
+end
+
+-- re-apply on window resize / phone rotation, plus once now
+if camera then
+    camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyResponsive)
+end
+task.defer(applyResponsive)
+applyResponsive()
+
+print("[Hudas Hub] Crab Tycoon Auto-Farm loaded.")

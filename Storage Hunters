@@ -2917,7 +2917,7 @@ SG.Parent = player.PlayerGui
 local MF = Instance.new("Frame")
 MF.BackgroundColor3 = Color3.fromRGB(8,8,8)
 MF.BorderSizePixel = 0
-MF.AnchorPoint = Vector2.new(0, 0.5)
+MF.AnchorPoint = Vector2.new(1, 0.5)
 MF.Parent = SG
 Instance.new("UICorner",MF).CornerRadius = UDim.new(0,14)
 local stroke = Instance.new("UIStroke",MF)
@@ -2958,24 +2958,10 @@ local function mkLabel(parent, txt, size, pos, tsz, font, color, zidx, xal)
     return l
 end
 
-mkLabel(HD,"STORAGE HUNTERS",UDim2.new(1,-68,0,28),UDim2.new(0,12,0,6),15,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),4)
-mkLabel(HD,"Hudas Hub",UDim2.new(1,-68,0,16),UDim2.new(0,12,0,34),9,Enum.Font.GothamBold,Color3.fromRGB(160,160,160),4)
+mkLabel(HD,"HUDAS HUB",UDim2.new(1,-68,0,24),UDim2.new(0,14,0,7),18,Enum.Font.GothamBlack,Color3.fromRGB(255,70,80),4)
+mkLabel(HD,"Storage Hunters  •  Auto-Farm",UDim2.new(1,-68,0,14),UDim2.new(0,14,0,33),11,Enum.Font.GothamMedium,Color3.fromRGB(150,150,160),4)
 
-local function hdBtn(txt, xOff, bg)
-    local b = Instance.new("TextButton",HD)
-    b.Size = UDim2.new(0,20,0,20)
-    b.Position = UDim2.new(1,xOff,0.5,-10)
-    b.BackgroundColor3 = bg
-    b.Text = txt; b.TextColor3 = Color3.fromRGB(180,180,180)
-    b.TextSize = 12; b.Font = Enum.Font.GothamBold
-    b.BorderSizePixel = 0; b.ZIndex = 5
-    Instance.new("UICorner",b).CornerRadius = UDim.new(1,0)
-    return b
-end
-local CloseBtn = hdBtn("×",-30,Color3.fromRGB(20,20,20))
-CloseBtn.TextColor3 = Color3.fromRGB(220,20,20)
-local MinBtn   = hdBtn("-",-56,Color3.fromRGB(20,20,20))
-MinBtn.TextColor3 = Color3.fromRGB(180,180,180)
+-- (minimize/close buttons removed — the floating logo button shows/hides the panel)
 
 -- Content
 local SC = Instance.new("ScrollingFrame",MF)
@@ -2990,34 +2976,51 @@ local lay = Instance.new("UIListLayout",SC)
 lay.SortOrder = Enum.SortOrder.LayoutOrder
 lay.Padding = UDim.new(0,6)
 
--- Responsive Sizing and Position Manager
+-- Responsive (Hudas Hub standard): a UIScale on the panel adapts to any device,
+-- the height is clamped to the viewport, and a floating logo button (set up later)
+-- shows/hides the whole panel.
 local minimized = false
-local currentWidth = 360
-local currentHeight = 520
+local DESIGN_W, DESIGN_H = 720, 560
+local camera = workspace.CurrentCamera
+local uiScale = Instance.new("UIScale", MF)
+local fab  -- floating toggle button (created later)
 
-local function getLayoutSize()
-    local viewport = workspace.CurrentCamera.ViewportSize
-    local screenW, screenH = viewport.X, viewport.Y
-    local width = math.clamp(screenW * 0.3, 280, 360)
-    local height = math.clamp(screenH - 100, 220, 520)
-    return width, height
+local function responsiveHeight()
+    local vp = camera and camera.ViewportSize
+    if not vp or vp.Y < 1 then return DESIGN_H end
+    local s = uiScale.Scale > 0 and uiScale.Scale or 1
+    return math.min(DESIGN_H, (vp.Y * 0.92) / s)
 end
 
-local function applyLayout()
-    local w, h = getLayoutSize()
-    currentWidth = w
-    currentHeight = h
-    if minimized then
-        MF.Size = UDim2.new(0, w, 0, 56)
-    else
-        MF.Size = UDim2.new(0, w, 0, h)
-        SC.Size = UDim2.new(1, -14, 1, -62)
+local function applyResponsive()
+    local vp = camera and camera.ViewportSize
+    if not vp or vp.X < 1 or vp.Y < 1 then return end
+    uiScale.Scale = math.clamp(math.min(vp.X / 1366, vp.Y / 768), 0.5, 1.15)
+    if not minimized then
+        MF.Size = UDim2.new(0, DESIGN_W, 0, responsiveHeight())
+        SC.Size = UDim2.new(1, -14, 1, -66)
     end
-    MF.Position = UDim2.new(0, 18, 0.5, 0)
+    -- keep the panel fully on-screen (anchor is (1,0.5), AbsolutePosition is top-left)
+    if MF.AbsoluteSize.X > 0 then
+        local as2, ap2 = MF.AbsoluteSize, MF.AbsolutePosition
+        local cx = math.clamp(ap2.X, 0, math.max(0, vp.X - as2.X))
+        local cy = math.clamp(ap2.Y, 0, math.max(0, vp.Y - as2.Y))
+        if math.abs(cx - ap2.X) > 0.5 or math.abs(cy - ap2.Y) > 0.5 then
+            MF.Position = UDim2.fromOffset(cx + as2.X, cy + as2.Y * 0.5)
+        end
+    end
+    if fab and fab.AbsoluteSize.X > 0 then
+        local fs = math.floor(52 * uiScale.Scale)
+        fab.Size = UDim2.fromOffset(fs, fs)
+        local fp = fab.AbsolutePosition
+        fab.Position = UDim2.fromOffset(
+            math.clamp(fp.X, 0, math.max(0, vp.X - fs)),
+            math.clamp(fp.Y, 0, math.max(0, vp.Y - fs)))
+    end
 end
 
-applyLayout()
-track(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(applyLayout))
+applyResponsive()
+track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyResponsive))
 
 -- Status bar
 local SB = Instance.new("Frame",SC)
@@ -3070,50 +3073,85 @@ local nextOrder = 10
 -- Each control registers { get=fn()->value, set=fn(value) } keyed by its label
 -- (or an explicit key). Save reads every get(); Load applies every set().
 local controls = {}
+-- ── Grouped columns: Crab Tycoon / Chicken Farm landscape layout ──
+-- Controls route into the column for their section (set by section()).
+-- Kept inside a do-block so only currentCol/SECTION_COL use a local slot
+-- (the GUI chunk is near Luau's 200-locals-per-function cap).
+local currentCol
+local SECTION_COL
+do
+    local columnsRow = Instance.new("Frame", SC)
+    columnsRow.Size = UDim2.new(1,0,0,0)
+    columnsRow.AutomaticSize = Enum.AutomaticSize.Y
+    columnsRow.BackgroundTransparency = 1
+    columnsRow.LayoutOrder = 5
+    local crl = Instance.new("UIListLayout", columnsRow)
+    crl.FillDirection = Enum.FillDirection.Horizontal
+    crl.Padding = UDim.new(0,8)
+    crl.VerticalAlignment = Enum.VerticalAlignment.Top
+    crl.SortOrder = Enum.SortOrder.LayoutOrder
+    local COLS = {}
+    for i = 1, 3 do
+        local c = Instance.new("Frame", columnsRow)
+        c.Size = UDim2.new(1/3,-6,0,0)
+        c.AutomaticSize = Enum.AutomaticSize.Y
+        c.BackgroundTransparency = 1
+        c.LayoutOrder = i
+        local cl = Instance.new("UIListLayout", c)
+        cl.SortOrder = Enum.SortOrder.LayoutOrder
+        cl.Padding = UDim.new(0,6)
+        COLS[i] = c
+    end
+    currentCol = COLS[1]
+    SECTION_COL = {
+        ["TELEPORTS"]=COLS[1], ["AUTO-FARM"]=COLS[1],
+        ["AUCTION"]=COLS[2], ["Auto"]=COLS[2], ["Shop"]=COLS[2],
+        ["Auto Pick-Up Filters"]=COLS[3], ["PLAYER"]=COLS[3], ["SETTINGS"]=COLS[3], ["PROFILES"]=COLS[3],
+    }
+end
 local function section(txt)
-    local holder = Instance.new("Frame",SC)
+    currentCol = SECTION_COL[txt] or currentCol
+    local holder = Instance.new("Frame",currentCol)
     holder.Size = UDim2.new(1,0,0,24)
     holder.BackgroundTransparency = 1
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    local bar = Instance.new("Frame",holder)
-    bar.Size = UDim2.new(0,3,0,12); bar.Position = UDim2.new(0,4,0.5,-5)
-    bar.BackgroundColor3 = Color3.fromRGB(220,20,20); bar.BorderSizePixel = 0
-    Instance.new("UICorner",bar).CornerRadius = UDim.new(1,0)
+    local div = Instance.new("Frame",holder)
+    div.Size = UDim2.new(1,0,0,1); div.Position = UDim2.new(0,0,0,1)
+    div.BackgroundColor3 = Color3.fromRGB(200,30,40); div.BackgroundTransparency = 0.4; div.BorderSizePixel = 0
     local l = Instance.new("TextLabel",holder)
-    l.Size = UDim2.new(1,-18,1,0); l.Position = UDim2.new(0,14,0,0)
+    l.Size = UDim2.new(1,-4,0,18); l.Position = UDim2.new(0,2,0,7)
     l.BackgroundTransparency = 1
     l.Text = string.upper(txt)
-    l.TextColor3 = Color3.fromRGB(220,20,20)
-    l.TextSize = 11; l.Font = Enum.Font.GothamBold
+    l.TextColor3 = Color3.fromRGB(255,70,80)
+    l.TextSize = 12; l.Font = Enum.Font.GothamBold
     l.TextXAlignment = Enum.TextXAlignment.Left
 end
 
 local function toggle(icon, txt, onFn, key)
-    if icon == "✦" then icon = "+" end
-    local row = Instance.new("Frame",SC)
-    row.Size = UDim2.new(1,0,0,44)
-    row.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    local row = Instance.new("Frame",currentCol)
+    row.Size = UDim2.new(1,0,0,32)
+    row.BackgroundColor3 = Color3.fromRGB(45,45,52)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,11)
-    local rst = Instance.new("UIStroke",row); rst.Color = Color3.fromRGB(220,20,20); rst.Transparency = 0.95; rst.Thickness = 1
-    mkLabel(row,icon,UDim2.new(0,32,1,0),UDim2.new(0,8,0,0),14,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),1,Enum.TextXAlignment.Center)
-    mkLabel(row,txt,UDim2.new(1,-90,1,0),UDim2.new(0,36,0,0),12,nil,Color3.fromRGB(200,200,200),1,Enum.TextXAlignment.Left)
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
+    local rst = Instance.new("UIStroke",row); rst.Color = Color3.fromRGB(200,30,40); rst.Transparency = 0.6; rst.Thickness = 1
+    local txl = mkLabel(row,txt,UDim2.new(1,-46,1,0),UDim2.new(0,10,0,0),12,Enum.Font.GothamMedium,Color3.fromRGB(235,235,240),1,Enum.TextXAlignment.Left)
+    txl.TextTruncate = Enum.TextTruncate.AtEnd
 
     local track = Instance.new("Frame",row)
-    track.Size = UDim2.new(0,44,0,22)
-    track.Position = UDim2.new(1,-50,0.5,-11)
-    track.BackgroundColor3 = Color3.fromRGB(24,24,24)
+    track.Size = UDim2.new(0,34,0,18)
+    track.Position = UDim2.new(1,-40,0.5,-9)
+    track.BackgroundColor3 = Color3.fromRGB(35,35,40)
     track.BorderSizePixel = 0
     Instance.new("UICorner",track).CornerRadius = UDim.new(1,0)
     local thumb = Instance.new("Frame",track)
-    thumb.Size = UDim2.new(0,16,0,16)
-    thumb.Position = UDim2.new(0,3,0.5,-8)
-    thumb.BackgroundColor3 = Color3.fromRGB(100,100,100)
+    thumb.Size = UDim2.new(0,14,0,14)
+    thumb.Position = UDim2.new(0,2,0.5,-7)
+    thumb.BackgroundColor3 = Color3.fromRGB(120,120,130)
     thumb.BorderSizePixel = 0
     Instance.new("UICorner",thumb).CornerRadius = UDim.new(1,0)
 
     local on = false
-    local ti = TweenInfo.new(0.18, Enum.EasingStyle.Quad)
+    local ti = TweenInfo.new(0.16, Enum.EasingStyle.Quad)
     local btn = Instance.new("TextButton",row)
     btn.Size = UDim2.new(1,0,1,0)
     btn.BackgroundTransparency = 1; btn.Text = ""
@@ -3121,11 +3159,13 @@ local function toggle(icon, txt, onFn, key)
     local function set(state)
         on = state
         if on then
-            TweenService:Create(track,ti,{BackgroundColor3=Color3.fromRGB(220,20,20)}):Play()
-            TweenService:Create(thumb,ti,{Position=UDim2.new(0,25,0.5,-8),BackgroundColor3=Color3.new(1,1,1)}):Play()
+            TweenService:Create(track,ti,{BackgroundColor3=Color3.fromRGB(220,40,50)}):Play()
+            TweenService:Create(thumb,ti,{Position=UDim2.new(0,18,0.5,-7),BackgroundColor3=Color3.new(1,1,1)}):Play()
+            row.BackgroundColor3 = Color3.fromRGB(60,22,26); rst.Transparency = 0.1
         else
-            TweenService:Create(track,ti,{BackgroundColor3=Color3.fromRGB(24,24,24)}):Play()
-            TweenService:Create(thumb,ti,{Position=UDim2.new(0,3,0.5,-8),BackgroundColor3=Color3.fromRGB(100,100,100)}):Play()
+            TweenService:Create(track,ti,{BackgroundColor3=Color3.fromRGB(35,35,40)}):Play()
+            TweenService:Create(thumb,ti,{Position=UDim2.new(0,2,0.5,-7),BackgroundColor3=Color3.fromRGB(120,120,130)}):Play()
+            row.BackgroundColor3 = Color3.fromRGB(45,45,52); rst.Transparency = 0.6
         end
         onFn(on)
     end
@@ -3145,7 +3185,7 @@ local function toggle(icon, txt, onFn, key)
 end
 
 local function actionBtn(txt, color, fn)
-    local row = Instance.new("Frame",SC)
+    local row = Instance.new("Frame",currentCol)
     row.Size = UDim2.new(1,0,0,36)
     row.BackgroundTransparency = 1
     row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
@@ -3166,9 +3206,9 @@ local function actionBtn(txt, color, fn)
 end
 
 local function slider(lbl, minV, maxV, defV, fn, key)
-    local row = Instance.new("Frame",SC)
+    local row = Instance.new("Frame",currentCol)
     row.Size = UDim2.new(1,0,0,52)
-    row.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    row.BackgroundColor3 = Color3.fromRGB(45,45,52)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     Instance.new("UICorner",row).CornerRadius = UDim.new(0,9)
 
@@ -3220,7 +3260,7 @@ end
 
 -- Compact checkbox row for checklists (rarity / mutation)
 local function checkRow(labelText, getState, setState, indent)
-    local row = Instance.new("Frame",SC)
+    local row = Instance.new("Frame",currentCol)
     row.Size = UDim2.new(1,0,0,26)
     row.BackgroundColor3 = Color3.fromRGB(10,10,10)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
@@ -3247,9 +3287,9 @@ end
 
 -- Number input row (typed value, no slider cap) for things like Min Price
 local function numberInput(labelText, default, onChange, key)
-    local row = Instance.new("Frame",SC)
+    local row = Instance.new("Frame",currentCol)
     row.Size = UDim2.new(1,0,0,38)
-    row.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    row.BackgroundColor3 = Color3.fromRGB(45,45,52)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
     mkLabel(row,labelText,UDim2.new(0.55,0,1,0),UDim2.new(0,12,0,0),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
@@ -3274,9 +3314,9 @@ end
 
 -- Read-only label row for status displays (e.g. Quick Sell Rate)
 local function labelRow(labelText, defaultVal)
-    local row = Instance.new("Frame",SC)
+    local row = Instance.new("Frame",currentCol)
     row.Size = UDim2.new(1,0,0,36)
-    row.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    row.BackgroundColor3 = Color3.fromRGB(45,45,52)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
     local rst = Instance.new("UIStroke",row); rst.Color = Color3.fromRGB(220,20,20); rst.Transparency = 0.95; rst.Thickness = 1
@@ -3294,9 +3334,9 @@ local function dropdown(titleText, items, getState, setState, key)
     local contentH = 30 * #items + 34
     local headH = 40
 
-    local holder = Instance.new("Frame", SC)
+    local holder = Instance.new("Frame", currentCol)
     holder.Size = UDim2.new(1,0,0,headH)
-    holder.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    holder.BackgroundColor3 = Color3.fromRGB(45,45,52)
     holder.BorderSizePixel = 0
     holder.ClipsDescendants = true
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
@@ -3385,9 +3425,9 @@ local function teleportDropdown(titleText, items, onSelect)
     local contentH = 30 * #items + 10
     local headH = 40
 
-    local holder = Instance.new("Frame", SC)
+    local holder = Instance.new("Frame", currentCol)
     holder.Size = UDim2.new(1,0,0,headH)
-    holder.BackgroundColor3 = Color3.fromRGB(12,12,12)
+    holder.BackgroundColor3 = Color3.fromRGB(45,45,52)
     holder.BorderSizePixel = 0
     holder.ClipsDescendants = true
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
@@ -3810,110 +3850,119 @@ end
 -- Forward-declared so the Save button's click closure can call it.
 local rebuildList
 
--- Profile name input
-local nameRow = Instance.new("Frame", SC)
-nameRow.Size = UDim2.new(1,0,0,38)
-nameRow.BackgroundColor3 = Color3.fromRGB(12,12,12)
-nameRow.BorderSizePixel = 0; nameRow.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-Instance.new("UICorner",nameRow).CornerRadius = UDim.new(0,8)
-mkLabel(nameRow,"Profile Name",UDim2.new(0.4,0,1,0),UDim2.new(0,12,0,0),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
-local nameBox = Instance.new("TextBox",nameRow)
-nameBox.Size = UDim2.new(0,150,0,24); nameBox.Position = UDim2.new(1,-160,0.5,-12)
-nameBox.BackgroundColor3 = Color3.fromRGB(20,20,20); nameBox.BorderSizePixel = 0
-nameBox.Text = ""; nameBox.PlaceholderText = "My Setup"
-nameBox.TextColor3 = Color3.new(1,1,1); nameBox.TextSize = 12
-nameBox.Font = Enum.Font.GothamBold; nameBox.ClearTextOnFocus = false
-Instance.new("UICorner",nameBox).CornerRadius = UDim.new(0,6)
-local nst = Instance.new("UIStroke",nameBox); nst.Color = Color3.fromRGB(220,20,20); nst.Transparency = 0.6; nst.Thickness = 1
+-- Profile manager (Create -> dropdown -> Load / Overwrite / Delete) — template style.
+-- Wrapped in a do-block so its many UI locals don't count toward Luau's 200-per-fn cap.
+do
+    local selectedProfile = nil
+    local inputRow = Instance.new("Frame", currentCol)
+    inputRow.Size = UDim2.new(1,0,0,32); inputRow.BackgroundTransparency = 1
+    inputRow.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    local nameBox = Instance.new("TextBox", inputRow)
+    nameBox.Size = UDim2.new(1,-74,1,0); nameBox.BackgroundColor3 = Color3.fromRGB(45,45,52)
+    nameBox.Text = ""; nameBox.PlaceholderText = "new profile name..."; nameBox.PlaceholderColor3 = Color3.fromRGB(150,150,160)
+    nameBox.TextColor3 = Color3.fromRGB(235,235,240); nameBox.TextSize = 12; nameBox.Font = Enum.Font.Gotham
+    nameBox.ClearTextOnFocus = false; nameBox.BorderSizePixel = 0
+    Instance.new("UICorner",nameBox).CornerRadius = UDim.new(0,6)
+    local nbp = Instance.new("UIPadding",nameBox); nbp.PaddingLeft = UDim.new(0,8); nbp.PaddingRight = UDim.new(0,8)
+    local createBtn = Instance.new("TextButton", inputRow)
+    createBtn.Size = UDim2.new(0,66,1,0); createBtn.Position = UDim2.new(1,-66,0,0)
+    createBtn.BackgroundColor3 = Color3.fromRGB(220,40,50); createBtn.Font = Enum.Font.GothamBold
+    createBtn.Text = "+ Create"; createBtn.TextColor3 = Color3.new(1,1,1); createBtn.TextSize = 12; createBtn.BorderSizePixel = 0
+    Instance.new("UICorner",createBtn).CornerRadius = UDim.new(0,6)
 
-actionBtn("Save / Create Profile", Color3.fromRGB(180,20,20), function()
-    local nm = sanitize(nameBox.Text)
-    if nm == "" then State.status = "[!] Enter a profile name first"; return end
-    if saveProfile(nm) then
-        State.status = "[Profiles] Saved: " .. nm
-        if rebuildList then rebuildList() end
-    else
-        State.status = "[!] Save failed (executor file access?)"
-    end
-end)
+    local ddButton = Instance.new("TextButton", currentCol)
+    ddButton.Size = UDim2.new(1,0,0,28); ddButton.BackgroundColor3 = Color3.fromRGB(45,45,52); ddButton.AutoButtonColor = false
+    ddButton.Text = ""; ddButton.BorderSizePixel = 0; ddButton.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner",ddButton).CornerRadius = UDim.new(0,6)
+    local dds = Instance.new("UIStroke",ddButton); dds.Color = Color3.fromRGB(200,30,40); dds.Transparency = 0.5
+    local ddLabel = mkLabel(ddButton,"Select profile...",UDim2.new(1,-32,1,0),UDim2.new(0,10,0,0),12,Enum.Font.GothamMedium,Color3.fromRGB(150,150,160),1,Enum.TextXAlignment.Left)
+    ddLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    local ddArrow = mkLabel(ddButton,"v",UDim2.new(0,26,1,0),UDim2.new(1,-28,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(255,70,80),1,Enum.TextXAlignment.Center)
 
--- List of saved profiles (each row: Load + delete)
-local listHolder = Instance.new("Frame", SC)
-listHolder.Size = UDim2.new(1,0,0,0)
-listHolder.AutomaticSize = Enum.AutomaticSize.Y
-listHolder.BackgroundTransparency = 1
-listHolder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-local llay = Instance.new("UIListLayout",listHolder)
-llay.SortOrder = Enum.SortOrder.LayoutOrder; llay.Padding = UDim.new(0,4)
+    local ddList = Instance.new("Frame", currentCol)
+    ddList.Size = UDim2.new(1,0,0,0); ddList.AutomaticSize = Enum.AutomaticSize.Y
+    ddList.BackgroundColor3 = Color3.fromRGB(28,28,32); ddList.BorderSizePixel = 0; ddList.Visible = false
+    ddList.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner",ddList).CornerRadius = UDim.new(0,6)
+    local ddll = Instance.new("UIListLayout",ddList); ddll.Padding = UDim.new(0,2); ddll.SortOrder = Enum.SortOrder.LayoutOrder
+    local ddp = Instance.new("UIPadding",ddList); ddp.PaddingTop = UDim.new(0,3); ddp.PaddingBottom = UDim.new(0,3); ddp.PaddingLeft = UDim.new(0,3); ddp.PaddingRight = UDim.new(0,3)
 
-rebuildList = function()
-    for _, ch in ipairs(listHolder:GetChildren()) do
-        if ch:IsA("Frame") then ch:Destroy() end
+    local actionRow = Instance.new("Frame", currentCol)
+    actionRow.Size = UDim2.new(1,0,0,28); actionRow.BackgroundTransparency = 1; actionRow.Visible = false
+    actionRow.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    local arl = Instance.new("UIListLayout",actionRow); arl.FillDirection = Enum.FillDirection.Horizontal; arl.Padding = UDim.new(0,6); arl.SortOrder = Enum.SortOrder.LayoutOrder
+    local function mkAction(txt,color,ord)
+        local b = Instance.new("TextButton",actionRow)
+        b.Size = UDim2.new(1/3,-4,1,0); b.BackgroundColor3 = color; b.Font = Enum.Font.GothamBold
+        b.Text = txt; b.TextColor3 = Color3.new(1,1,1); b.TextSize = 11; b.BorderSizePixel = 0; b.LayoutOrder = ord
+        Instance.new("UICorner",b).CornerRadius = UDim.new(0,6)
+        return b
     end
-    local profs = listProfiles()
-    if #profs == 0 then
-        local empty = Instance.new("Frame",listHolder)
-        empty.Size = UDim2.new(1,0,0,24); empty.BackgroundTransparency = 1; empty.LayoutOrder = 1
-        mkLabel(empty, hasFiles and "No saved profiles yet" or "Executor has no file access",
-            UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),11,nil,Color3.fromRGB(120,120,140),1,Enum.TextXAlignment.Center)
-        return
+    local loadAct = mkAction("Load", Color3.fromRGB(220,40,50), 1)
+    local owAct   = mkAction("Overwrite", Color3.fromRGB(150,90,30), 2)
+    local delAct  = mkAction("Delete", Color3.fromRGB(90,30,34), 3)
+
+    local function setSelected(name)
+        selectedProfile = name
+        ddLabel.Text = name or "Select profile..."
+        ddLabel.TextColor3 = name and Color3.fromRGB(235,235,240) or Color3.fromRGB(150,150,160)
+        actionRow.Visible = name ~= nil
     end
-    for i, name in ipairs(profs) do
-        local r = Instance.new("Frame",listHolder)
-        r.Size = UDim2.new(1,0,0,30); r.BackgroundColor3 = Color3.fromRGB(14,14,14)
-        r.BorderSizePixel = 0; r.LayoutOrder = i
-        Instance.new("UICorner",r).CornerRadius = UDim.new(0,7)
-        mkLabel(r,">  "..name,UDim2.new(1,-100,1,0),UDim2.new(0,10,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),1,Enum.TextXAlignment.Left)
-        local lb = Instance.new("TextButton",r)
-        lb.Size = UDim2.new(0,56,0,22); lb.Position = UDim2.new(1,-90,0.5,-11)
-        lb.BackgroundColor3 = Color3.fromRGB(180,20,20); lb.BorderSizePixel = 0
-        lb.Text = "Load"; lb.TextColor3 = Color3.new(1,1,1); lb.TextSize = 11; lb.Font = Enum.Font.GothamBold
-        Instance.new("UICorner",lb).CornerRadius = UDim.new(0,6)
-        lb.MouseButton1Click:Connect(function()
-            if applyProfile(name) then
-                nameBox.Text = name
-                State.status = "[Profiles] Loaded: " .. name
-            else
-                State.status = "[!] Failed to load " .. name
+    local function closeDropdown() ddList.Visible = false; ddArrow.Text = "v" end
+    rebuildList = function()
+        for _,ch in ipairs(ddList:GetChildren()) do
+            if ch:IsA("TextButton") or ch:IsA("TextLabel") then ch:Destroy() end
+        end
+        local names = listProfiles()
+        if #names == 0 then
+            mkLabel(ddList,"(no profiles yet)",UDim2.new(1,0,0,22),UDim2.new(0,0,0,0),11,nil,Color3.fromRGB(150,150,160),1,Enum.TextXAlignment.Center)
+        else
+            for i,nm in ipairs(names) do
+                local opt = Instance.new("TextButton",ddList)
+                opt.Size = UDim2.new(1,0,0,24); opt.BackgroundColor3 = Color3.fromRGB(45,45,52); opt.Font = Enum.Font.Gotham
+                opt.Text = "  "..nm; opt.TextXAlignment = Enum.TextXAlignment.Left; opt.TextColor3 = Color3.fromRGB(235,235,240)
+                opt.TextSize = 12; opt.BorderSizePixel = 0; opt.LayoutOrder = i
+                Instance.new("UICorner",opt).CornerRadius = UDim.new(0,5)
+                opt.MouseButton1Click:Connect(function() setSelected(nm); closeDropdown() end)
             end
-        end)
-        local db = Instance.new("TextButton",r)
-        db.Size = UDim2.new(0,24,0,22); db.Position = UDim2.new(1,-28,0.5,-11)
-        db.BackgroundColor3 = Color3.fromRGB(30,30,30); db.BorderSizePixel = 0
-        db.Text = "X"; db.TextColor3 = Color3.fromRGB(220,20,20); db.TextSize = 12; db.Font = Enum.Font.GothamBold
-        Instance.new("UICorner",db).CornerRadius = UDim.new(0,6)
-        db.MouseButton1Click:Connect(function()
-            deleteProfile(name); State.status = "[Profiles] Deleted: " .. name; rebuildList()
-        end)
+        end
+        if selectedProfile then
+            local found = false
+            for _,nm in ipairs(names) do if nm == selectedProfile then found = true break end end
+            if not found then setSelected(nil) end
+        end
     end
+    ddButton.MouseButton1Click:Connect(function()
+        ddList.Visible = not ddList.Visible
+        ddArrow.Text = ddList.Visible and "^" or "v"
+        if ddList.Visible then rebuildList() end
+    end)
+    createBtn.MouseButton1Click:Connect(function()
+        local nm = sanitize(nameBox.Text)
+        if nm == "" then State.status = "[!] Enter a profile name first"; return end
+        if saveProfile(nm) then nameBox.Text = ""; rebuildList(); setSelected(nm); State.status = "[Profiles] Saved: "..nm
+        else State.status = "[!] Save failed (executor file access?)" end
+    end)
+    loadAct.MouseButton1Click:Connect(function()
+        if selectedProfile and applyProfile(selectedProfile) then State.status = "[Profiles] Loaded: "..selectedProfile end
+    end)
+    owAct.MouseButton1Click:Connect(function()
+        if selectedProfile and saveProfile(selectedProfile) then State.status = "[Profiles] Overwrote: "..selectedProfile end
+    end)
+    delAct.MouseButton1Click:Connect(function()
+        if selectedProfile then local n = selectedProfile; deleteProfile(n); setSelected(nil); rebuildList(); State.status = "[Profiles] Deleted: "..n end
+    end)
+    rebuildList()
 end
-rebuildList()
 
 -- Footer
-local ft = Instance.new("Frame",SC)
+local ft = Instance.new("Frame",currentCol)
 ft.Size = UDim2.new(1,0,0,22)
 ft.BackgroundColor3 = Color3.fromRGB(10,10,10)
 ft.BorderSizePixel = 0; ft.LayoutOrder = 999
 Instance.new("UICorner",ft).CornerRadius = UDim.new(0,6)
 mkLabel(ft,"Storage Hunters AutoFarm v3  |  MCP Crafted",UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),9,nil,Color3.fromRGB(100,100,100),1,Enum.TextXAlignment.Center)
 
--- Minimize/Close
-MinBtn.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    local ti = TweenInfo.new(0.22,Enum.EasingStyle.Quad)
-    local targetW, targetH = getLayoutSize()
-    if minimized then
-        TweenService:Create(MF,ti,{Size=UDim2.new(0,targetW,0,56)}):Play()
-        SC.Visible = false; MinBtn.Text = "+"
-    else
-        TweenService:Create(MF,ti,{Size=UDim2.new(0,targetW,0,targetH)}):Play()
-        SC.Visible = true; MinBtn.Text = "-"
-    end
-end)
-CloseBtn.MouseButton1Click:Connect(function()
-    TweenService:Create(MF,TweenInfo.new(0.2),{Size=UDim2.new(0,0,0,0),BackgroundTransparency=1}):Play()
-    task.delay(0.25,function() SG:Destroy() end)
-end)
 
 -- Drag (supports both mouse and touch)
 local isDrag,dStart,dPos=false,nil,nil
@@ -3929,8 +3978,68 @@ track(UserInputService.InputChanged:Connect(function(i)
     end
 end))
 track(UserInputService.InputEnded:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then isDrag=false end
+    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+        if isDrag then isDrag=false; applyResponsive() end  -- snap back on-screen
+    end
 end))
+
+-- ─── FLOATING LOGO BUTTON (drag to move, tap to show/hide the panel) ───
+local function resolveLogo()
+    local ok, id = pcall(function()
+        if getcustomasset and isfile and isfile("HudasHub_Logo.png") then
+            return getcustomasset("HudasHub_Logo.png")
+        end
+    end)
+    if ok and type(id) == "string" then return id end
+    return nil
+end
+fab = Instance.new("TextButton")
+fab.Name = "Toggle"
+fab.Size = UDim2.fromOffset(52, 52)
+fab.AnchorPoint = Vector2.new(0, 0.5)
+fab.Position = UDim2.new(0, 6, 0.5, 0)
+fab.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+fab.AutoButtonColor = false
+fab.Text = ""
+fab.Active = true
+fab.ZIndex = 50
+fab.Parent = SG
+Instance.new("UICorner", fab).CornerRadius = UDim.new(1, 0)
+local fring = Instance.new("UIStroke", fab); fring.Color = Color3.fromRGB(235, 70, 50); fring.Thickness = 2.5
+do
+    local logoId = resolveLogo()
+    if logoId then
+        local lg = Instance.new("ImageLabel", fab)
+        lg.Size = UDim2.fromScale(0.84, 0.84); lg.Position = UDim2.fromScale(0.08, 0.08)
+        lg.BackgroundTransparency = 1; lg.Image = logoId; lg.ZIndex = 51
+        Instance.new("UICorner", lg).CornerRadius = UDim.new(1, 0)
+    else
+        local t = Instance.new("TextLabel", fab)
+        t.Size = UDim2.fromScale(1, 1); t.BackgroundTransparency = 1; t.Font = Enum.Font.GothamBlack
+        t.Text = "HH"; t.TextColor3 = Color3.fromRGB(255, 70, 80); t.TextSize = 20; t.ZIndex = 51
+    end
+end
+do
+    local fDrag, fMoved, fStart, fPos
+    fab.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            fDrag = true; fMoved = false; fStart = i.Position; fPos = fab.Position
+        end
+    end)
+    track(UserInputService.InputChanged:Connect(function(i)
+        if fDrag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - fStart
+            if math.abs(d.X) + math.abs(d.Y) > 6 then fMoved = true end
+            fab.Position = UDim2.new(fPos.X.Scale, fPos.X.Offset + d.X, fPos.Y.Scale, fPos.Y.Offset + d.Y)
+        end
+    end))
+    track(UserInputService.InputEnded:Connect(function(i)
+        if fDrag and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            fDrag = false
+            if not fMoved then MF.Visible = not MF.Visible end
+        end
+    end))
+end
 
 -- Heartbeat update
 local function cleanStatus(str)
@@ -4109,9 +4218,8 @@ startCurrentAuctionESPManager()
 startAutoAcceptOffers()
 
 MF.Size = UDim2.new(0,0,0,0)
-MF.Position = UDim2.new(0, 18, 0.5, 0)
-local initW, initH = getLayoutSize()
-TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,initW,0,initH)}):Play()
+MF.Position = UDim2.new(1, -18, 0.5, 0)
+TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,DESIGN_W,0,responsiveHeight())}):Play()
 
 local plotName = State.myPlot and State.myPlot.Name or "Searching..."
 State.status = "[System] Ready! Plot: " .. plotName

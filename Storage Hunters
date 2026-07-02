@@ -2921,6 +2921,13 @@ SG.ResetOnSpawn = false
 SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 SG.IgnoreGuiInset = true
 SG.Parent = player.PlayerGui
+ 
+local oldCleanup = _G.__SH_AF_CLEANUP
+_G.__SH_AF_CLEANUP = function()
+    if oldCleanup then pcall(oldCleanup) end
+    pcall(function() SG:Destroy() end)
+    pcall(removeAuctionBillboard)
+end
 
 local DESIGN_W, DESIGN_H = 760, 485
 local camera = workspace.CurrentCamera
@@ -2951,11 +2958,12 @@ local function applyResponsive()
     if fab and fab.AbsoluteSize.X > 0 then
         local fs = math.floor(52 * uiScale.Scale)
         fab.Size = UDim2.fromOffset(fs, fs)
-        local fp = fab.AbsolutePosition
-        local cx = math.clamp(fp.X, 0, math.max(0, vp.X - fs))
-        local cy = math.clamp(fp.Y, 0, math.max(0, vp.Y - fs))
-        if math.abs(cx - fp.X) > 0.5 or math.abs(cy - fp.Y) > 0.5 then
-            fab.Position = UDim2.fromOffset(cx, cy + fs * 0.5)
+        local px = fab.Position.X.Offset
+        local py = fab.Position.Y.Offset
+        local cx = math.clamp(px, fs * 0.5, vp.X - fs * 0.5)
+        local cy = math.clamp(py, fs * 0.5, vp.Y - fs * 0.5)
+        if math.abs(cx - px) > 0.5 or math.abs(cy - py) > 0.5 then
+            fab.Position = UDim2.fromOffset(cx, cy)
         end
     end
 end
@@ -4228,7 +4236,18 @@ track(UserInputService.InputChanged:Connect(function(i)
 end))
 track(UserInputService.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-        if isDrag then isDrag = false; applyResponsive() end
+        if isDrag then
+            isDrag = false
+            local vp = camera and camera.ViewportSize
+            if vp and vp.X > 0 and vp.Y > 0 and MF.AbsoluteSize.X > 0 then
+                local as2, ap2 = MF.AbsoluteSize, MF.AbsolutePosition
+                local cx = math.clamp(ap2.X, 0, math.max(0, vp.X - as2.X))
+                local cy = math.clamp(ap2.Y, 0, math.max(0, vp.Y - as2.Y))
+                if math.abs(cx - ap2.X) > 0.5 or math.abs(cy - ap2.Y) > 0.5 then
+                    MF.Position = UDim2.fromOffset(cx + as2.X * 0.5, cy + as2.Y * 0.5)
+                end
+            end
+        end
     end
 end))
 
@@ -4246,8 +4265,8 @@ end
 fab = Instance.new("TextButton")
 fab.Name = "Toggle"
 fab.Size = UDim2.fromOffset(52, 52)
-fab.AnchorPoint = Vector2.new(0, 0.5)
-fab.Position = UDim2.new(0, 6, 0.5, 0)
+fab.AnchorPoint = Vector2.new(0.5, 0.5)
+fab.Position = UDim2.new(0, 32, 0.5, 0)
 fab.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
 fab.AutoButtonColor = false
 fab.Text = ""
@@ -4489,9 +4508,6 @@ local function listenToNewGarages()
             end
         end
         track(garages.ChildAdded:Connect(onChild))
-        for _, g in ipairs(garages:GetChildren()) do
-            task.spawn(onChild, g)
-        end
     end
 end
 pcall(listenToNewGarages)

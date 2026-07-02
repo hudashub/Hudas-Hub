@@ -3140,9 +3140,13 @@ local function switchTab(tabName)
     
     for name, btn in pairs(tabButtons) do
         local isActive = (name == tabName)
-        btn.Indicator.Visible = isActive
+        local indicator = btn:FindFirstChild("Indicator")
+        local label = btn:FindFirstChild("Label")
+        if indicator then indicator.Visible = isActive end
         btn.BackgroundColor3 = isActive and Color3.fromRGB(24, 20, 22) or Color3.fromRGB(15, 15, 17)
-        btn.Label.TextColor3 = isActive and Color3.fromRGB(250, 250, 250) or Color3.fromRGB(150, 150, 160)
+        if label then
+            label.TextColor3 = isActive and Color3.fromRGB(250, 250, 250) or Color3.fromRGB(150, 150, 160)
+        end
     end
     
     for name, frame in pairs(pageFrames) do
@@ -3178,9 +3182,6 @@ local function createTabButton(name, display, order)
     label.TextColor3 = Color3.fromRGB(150, 150, 160)
     label.TextSize = 12
     label.TextXAlignment = Enum.TextXAlignment.Left
-    
-    btn.Indicator = indicator
-    btn.Label = label
     
     btn.MouseButton1Click:Connect(function()
         switchTab(name)

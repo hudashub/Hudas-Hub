@@ -2867,6 +2867,8 @@ local function startAutoPromptHandler()
                                         elseif text == "continue" or text == "yes" or text == "confirm" or text == "ok" or text == "okay" then
                                             shouldClick = true
                                         end
+                                    end
+                                    
                                     if shouldClick then
                                         pcall(function() desc:Activate() end)
                                         if getconnections then

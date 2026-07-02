@@ -13,6 +13,7 @@ local WS               = game:GetService("Workspace")
 local VR               = game:GetService("VirtualUser")
 local PPS              = game:GetService("ProximityPromptService")
 local HttpService      = game:GetService("HttpService")
+local scriptStart      = os.clock()
 
 -- ─── INSTANCE CLEANUP ─────────────────────────────────────────────────
 -- Executor reloads do NOT kill the previous run's event connections / loops,
@@ -2866,8 +2867,6 @@ local function startAutoPromptHandler()
                                         elseif text == "continue" or text == "yes" or text == "confirm" or text == "ok" or text == "okay" then
                                             shouldClick = true
                                         end
-                                    end
-                                    
                                     if shouldClick then
                                         pcall(function() desc:Activate() end)
                                         if getconnections then
@@ -2914,76 +2913,11 @@ SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 SG.IgnoreGuiInset = true
 SG.Parent = player.PlayerGui
 
-local MF = Instance.new("Frame")
-MF.BackgroundColor3 = Color3.fromRGB(8,8,8)
-MF.BorderSizePixel = 0
-MF.AnchorPoint = Vector2.new(1, 0.5)
-MF.Parent = SG
-Instance.new("UICorner",MF).CornerRadius = UDim.new(0,14)
-local stroke = Instance.new("UIStroke",MF)
-stroke.Color = Color3.fromRGB(220,20,20)
-stroke.Thickness = 1.0
-stroke.Transparency = 0.3
-
--- Header
-local HD = Instance.new("Frame",MF)
-HD.Name = "Header"
-HD.Size = UDim2.new(1,0,0,56)
-HD.BackgroundColor3 = Color3.fromRGB(12,12,12)
-HD.BorderSizePixel = 0
-HD.ZIndex = 3
-Instance.new("UICorner",HD).CornerRadius = UDim.new(0,14)
-local HDfix = Instance.new("Frame",HD)
-HDfix.Size = UDim2.new(1,0,0.5,0)
-HDfix.Position = UDim2.new(0,0,0.5,0)
-HDfix.BackgroundColor3 = Color3.fromRGB(12,12,12)
-HDfix.BorderSizePixel = 0
-HDfix.ZIndex = 3
-local HDBorder = Instance.new("Frame", HD)
-HDBorder.Size = UDim2.new(1,0,0,2)
-HDBorder.Position = UDim2.new(0,0,1,-2)
-HDBorder.BackgroundColor3 = Color3.fromRGB(220,20,20)
-HDBorder.BorderSizePixel = 0
-HDBorder.ZIndex = 4
-
-local function mkLabel(parent, txt, size, pos, tsz, font, color, zidx, xal)
-    local l = Instance.new("TextLabel", parent)
-    l.Size = size; l.Position = pos
-    l.BackgroundTransparency = 1
-    l.Text = txt; l.TextSize = tsz or 13
-    l.Font = font or Enum.Font.Gotham
-    l.TextColor3 = color or Color3.new(1,1,1)
-    l.ZIndex = zidx or 1
-    l.TextXAlignment = xal or Enum.TextXAlignment.Left
-    return l
-end
-
-mkLabel(HD,"HUDAS HUB",UDim2.new(1,-68,0,24),UDim2.new(0,14,0,7),18,Enum.Font.GothamBlack,Color3.fromRGB(255,70,80),4)
-mkLabel(HD,"Storage Hunters  •  Auto-Farm",UDim2.new(1,-68,0,14),UDim2.new(0,14,0,33),11,Enum.Font.GothamMedium,Color3.fromRGB(150,150,160),4)
-
--- (minimize/close buttons removed — the floating logo button shows/hides the panel)
-
--- Content
-local SC = Instance.new("ScrollingFrame",MF)
-SC.Position = UDim2.new(0,7,0,60)
-SC.BackgroundTransparency = 1
-SC.BorderSizePixel = 0
-SC.ScrollBarThickness = 3
-SC.ScrollBarImageColor3 = Color3.fromRGB(220,20,20)
-SC.CanvasSize = UDim2.new(0,0,0,0)
-SC.AutomaticCanvasSize = Enum.AutomaticSize.Y
-local lay = Instance.new("UIListLayout",SC)
-lay.SortOrder = Enum.SortOrder.LayoutOrder
-lay.Padding = UDim.new(0,6)
-
--- Responsive (Hudas Hub standard): a UIScale on the panel adapts to any device,
--- the height is clamped to the viewport, and a floating logo button (set up later)
--- shows/hides the whole panel.
-local minimized = false
-local DESIGN_W, DESIGN_H = 720, 560
+local DESIGN_W, DESIGN_H = 760, 485
 local camera = workspace.CurrentCamera
+local fab
+local MF = Instance.new("Frame")
 local uiScale = Instance.new("UIScale", MF)
-local fab  -- floating toggle button (created later)
 
 local function responsiveHeight()
     local vp = camera and camera.ViewportSize
@@ -2996,17 +2930,13 @@ local function applyResponsive()
     local vp = camera and camera.ViewportSize
     if not vp or vp.X < 1 or vp.Y < 1 then return end
     uiScale.Scale = math.clamp(math.min(vp.X / 1366, vp.Y / 768), 0.5, 1.15)
-    if not minimized then
-        MF.Size = UDim2.new(0, DESIGN_W, 0, responsiveHeight())
-        SC.Size = UDim2.new(1, -14, 1, -66)
-    end
-    -- keep the panel fully on-screen (anchor is (1,0.5), AbsolutePosition is top-left)
+    MF.Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())
     if MF.AbsoluteSize.X > 0 then
         local as2, ap2 = MF.AbsoluteSize, MF.AbsolutePosition
         local cx = math.clamp(ap2.X, 0, math.max(0, vp.X - as2.X))
         local cy = math.clamp(ap2.Y, 0, math.max(0, vp.Y - as2.Y))
         if math.abs(cx - ap2.X) > 0.5 or math.abs(cy - ap2.Y) > 0.5 then
-            MF.Position = UDim2.fromOffset(cx + as2.X, cy + as2.Y * 0.5)
+            MF.Position = UDim2.fromOffset(cx + as2.X*0.5, cy + as2.Y * 0.5)
         end
     end
     if fab and fab.AbsoluteSize.X > 0 then
@@ -3019,157 +2949,412 @@ local function applyResponsive()
     end
 end
 
-applyResponsive()
 track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyResponsive))
 
--- Status bar
-local SB = Instance.new("Frame",SC)
-SB.Size = UDim2.new(1,0,0,34)
-SB.BackgroundColor3 = Color3.fromRGB(12,12,12)
-SB.BorderSizePixel = 0; SB.LayoutOrder = 0
-Instance.new("UICorner",SB).CornerRadius = UDim.new(0,10)
-local SDot = Instance.new("Frame",SB)
-SDot.Size = UDim2.new(0,8,0,8)
-SDot.Position = UDim2.new(0,10,0.5,-4)
-SDot.BackgroundColor3 = Color3.fromRGB(40,40,40)
-SDot.BorderSizePixel = 0
-Instance.new("UICorner",SDot).CornerRadius = UDim.new(1,0)
-local SLbl = mkLabel(SB,"Status: Idle",UDim2.new(1,-28,1,0),UDim2.new(0,26,0,0),11,Enum.Font.Gotham,Color3.fromRGB(180,180,180),1)
-SLbl.TextTruncate = Enum.TextTruncate.AtEnd
+MF.BackgroundColor3 = Color3.fromRGB(11, 11, 13)
+MF.BorderSizePixel = 0
+MF.AnchorPoint = Vector2.new(0.5, 0.5)
+MF.Position = UDim2.new(0.5, 0, 0.5, 0)
+MF.Size = UDim2.fromOffset(DESIGN_W, DESIGN_H)
+MF.Parent = SG
+Instance.new("UICorner", MF).CornerRadius = UDim.new(0, 16)
+local stroke = Instance.new("UIStroke", MF)
+stroke.Color = Color3.fromRGB(235, 70, 50)
+stroke.Thickness = 1.0
+stroke.Transparency = 0.6
 
--- Stats
-local SF = Instance.new("Frame",SC)
-SF.Size = UDim2.new(1,0,0,60)
-SF.BackgroundColor3 = Color3.fromRGB(12,12,12)
-SF.BorderSizePixel = 0; SF.LayoutOrder = 1
-Instance.new("UICorner",SF).CornerRadius = UDim.new(0,10)
-local sgL = Instance.new("UIListLayout",SF)
-sgL.FillDirection = Enum.FillDirection.Horizontal
-sgL.HorizontalAlignment = Enum.HorizontalAlignment.Center
-sgL.VerticalAlignment = Enum.VerticalAlignment.Center
-sgL.Padding = UDim.new(0,2)
+-- Left Sidebar Frame
+local Sidebar = Instance.new("Frame", MF)
+Sidebar.Name = "Sidebar"
+Sidebar.Size = UDim2.new(0, 210, 1, 0)
+Sidebar.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+Sidebar.BorderSizePixel = 0
+Instance.new("UICorner", Sidebar).CornerRadius = UDim.new(0, 16)
 
-local EV, ISV, BWV
-do
-    local function statCell(icon, lbl, order)
-        local c = Instance.new("Frame",SF)
-        c.Size = UDim2.new(0.33,-2,1,-10)
-        c.BackgroundColor3 = Color3.fromRGB(16,16,16)
-        c.BorderSizePixel = 0; c.LayoutOrder = order
-        Instance.new("UICorner",c).CornerRadius = UDim.new(0,9)
-        mkLabel(c,icon,UDim2.new(1,0,0,20),UDim2.new(0,0,0,3),14,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),1,Enum.TextXAlignment.Center)
-        local v = mkLabel(c,"0",UDim2.new(1,0,0,14),UDim2.new(0,0,0,22),12,Enum.Font.GothamBold,Color3.fromRGB(255,255,255),1,Enum.TextXAlignment.Center)
-        mkLabel(c,lbl,UDim2.new(1,0,0,12),UDim2.new(0,0,0,38),9,nil,Color3.fromRGB(120,120,120),1,Enum.TextXAlignment.Center)
-        return v
+-- Sidebar Corner Clipper (to keep content frame looking flat-bordered next to sidebar)
+local SB_clipper = Instance.new("Frame", Sidebar)
+SB_clipper.Size = UDim2.new(0, 16, 1, 0)
+SB_clipper.Position = UDim2.new(1, -16, 0, 0)
+SB_clipper.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+SB_clipper.BorderSizePixel = 0
+SB_clipper.ZIndex = 1
+
+-- Sidebar Header (Logo + Title)
+local SB_header = Instance.new("Frame", Sidebar)
+SB_header.Size = UDim2.new(1, 0, 0, 70)
+SB_header.BackgroundTransparency = 1
+SB_header.ZIndex = 2
+
+-- Circular Logo (HH)
+local SB_logo = Instance.new("Frame", SB_header)
+SB_logo.Size = UDim2.fromOffset(40, 40)
+SB_logo.Position = UDim2.new(0, 16, 0.5, -20)
+SB_logo.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+SB_logo.BorderSizePixel = 0
+SB_logo.ZIndex = 2
+Instance.new("UICorner", SB_logo).CornerRadius = UDim.new(1, 0)
+local logo_stroke = Instance.new("UIStroke", SB_logo)
+logo_stroke.Color = Color3.fromRGB(235, 70, 50)
+logo_stroke.Thickness = 1.5
+
+local logo_text = Instance.new("TextLabel", SB_logo)
+logo_text.Size = UDim2.fromScale(1, 1)
+logo_text.BackgroundTransparency = 1
+logo_text.Font = Enum.Font.GothamBlack
+logo_text.Text = "HH"
+logo_text.TextColor3 = Color3.fromRGB(235, 70, 50)
+logo_text.TextSize = 16
+logo_text.ZIndex = 2
+
+-- Header titles
+local header_title = Instance.new("TextLabel", SB_header)
+header_title.Size = UDim2.new(1, -72, 0, 18)
+header_title.Position = UDim2.new(0, 66, 0.5, -18)
+header_title.BackgroundTransparency = 1
+header_title.Font = Enum.Font.GothamBold
+header_title.Text = "Storage Hunters"
+header_title.TextColor3 = Color3.fromRGB(245, 245, 245)
+header_title.TextSize = 13
+header_title.TextXAlignment = Enum.TextXAlignment.Left
+header_title.ZIndex = 2
+
+local header_sub = Instance.new("TextLabel", SB_header)
+header_sub.Size = UDim2.new(1, -72, 0, 14)
+header_sub.Position = UDim2.new(0, 66, 0.5, 0)
+header_sub.BackgroundTransparency = 1
+header_sub.Font = Enum.Font.GothamMedium
+header_sub.Text = "Hudas Hub"
+header_sub.TextColor3 = Color3.fromRGB(235, 70, 50)
+header_sub.TextSize = 10
+header_sub.TextXAlignment = Enum.TextXAlignment.Left
+header_sub.ZIndex = 2
+
+-- Sidebar Tab Container
+local tabContainer = Instance.new("Frame", Sidebar)
+tabContainer.Name = "Tabs"
+tabContainer.Size = UDim2.new(1, 0, 1, -115)
+tabContainer.Position = UDim2.new(0, 0, 0, 75)
+tabContainer.BackgroundTransparency = 1
+tabContainer.ZIndex = 2
+
+local tabLayout = Instance.new("UIListLayout", tabContainer)
+tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+tabLayout.Padding = UDim.new(0, 6)
+tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+local SB_footer = Instance.new("TextLabel", Sidebar)
+SB_footer.Size = UDim2.new(1, 0, 0, 30)
+SB_footer.Position = UDim2.new(0, 0, 1, -35)
+SB_footer.BackgroundTransparency = 1
+SB_footer.Font = Enum.Font.GothamMedium
+SB_footer.Text = "v3.0 • 2026"
+SB_footer.TextColor3 = Color3.fromRGB(80, 80, 90)
+SB_footer.TextSize = 10
+SB_footer.TextXAlignment = Enum.TextXAlignment.Center
+SB_footer.ZIndex = 2
+
+-- Right Content Panel
+local Content = Instance.new("Frame", MF)
+Content.Name = "Content"
+Content.Size = UDim2.new(1, -210, 1, 0)
+Content.Position = UDim2.new(0, 210, 0, 0)
+Content.BackgroundTransparency = 1
+Content.ZIndex = 2
+
+local ContentHeader = Instance.new("Frame", Content)
+ContentHeader.Name = "Header"
+ContentHeader.Size = UDim2.new(1, 0, 0, 65)
+ContentHeader.BackgroundTransparency = 1
+
+local pageTitle = Instance.new("TextLabel", ContentHeader)
+pageTitle.Size = UDim2.new(1, -50, 0, 24)
+pageTitle.Position = UDim2.new(0, 18, 0, 18)
+pageTitle.BackgroundTransparency = 1
+pageTitle.Font = Enum.Font.GothamBold
+pageTitle.Text = "Dashboard"
+pageTitle.TextColor3 = Color3.fromRGB(250, 250, 250)
+pageTitle.TextSize = 20
+pageTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local pageSub = Instance.new("TextLabel", ContentHeader)
+pageSub.Size = UDim2.new(1, -50, 0, 16)
+pageSub.Position = UDim2.new(0, 18, 0, 40)
+pageSub.BackgroundTransparency = 1
+pageSub.Font = Enum.Font.Gotham
+pageSub.Text = "Live overview of the grind"
+pageSub.TextColor3 = Color3.fromRGB(150, 150, 160)
+pageSub.TextSize = 11
+pageSub.TextXAlignment = Enum.TextXAlignment.Left
+
+local minimizeBtn = Instance.new("TextButton", ContentHeader)
+minimizeBtn.Name = "Minimize"
+minimizeBtn.Size = UDim2.fromOffset(24, 24)
+minimizeBtn.Position = UDim2.new(1, -38, 0, 18)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+minimizeBtn.BorderSizePixel = 0
+minimizeBtn.Font = Enum.Font.GothamBold
+minimizeBtn.Text = "-"
+minimizeBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
+minimizeBtn.TextSize = 14
+Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 6)
+local min_stroke = Instance.new("UIStroke", minimizeBtn)
+min_stroke.Color = Color3.fromRGB(45, 45, 52)
+min_stroke.Thickness = 1
+
+local Pages = Instance.new("Frame", Content)
+Pages.Name = "Pages"
+Pages.Size = UDim2.new(1, -36, 1, -85)
+Pages.Position = UDim2.new(0, 18, 0, 65)
+Pages.BackgroundTransparency = 1
+
+-- Tab Switching Engine
+local tabButtons = {}
+local pageFrames = {}
+local pageTitles = {
+    Dashboard = "Dashboard",
+    Teleports = "Teleports",
+    AutoFarm = "Auto-Farm",
+    Auctions = "Auctions",
+    Shop = "Pawn/Shop",
+    Filters = "Filters",
+    Settings = "Settings"
+}
+local pageSubs = {
+    Dashboard = "Live overview of the grind",
+    Teleports = "Instantly move around the map",
+    AutoFarm = "Automate containers, shopping, items, and safes",
+    Auctions = "Auto bid, bid delay, and outbidding players",
+    Shop = "Auto sell, grading, cleaning, and energy drinks",
+    Filters = "Configure item, safe, mutation, and accessory filters",
+    Settings = "Anti-AFK, Speed Hacks, and Profiles"
+}
+
+local activeTab = "Dashboard"
+
+local function switchTab(tabName)
+    activeTab = tabName
+    pageTitle.Text = pageTitles[tabName]
+    pageSub.Text = pageSubs[tabName]
+    
+    for name, btn in pairs(tabButtons) do
+        local isActive = (name == tabName)
+        btn.Indicator.Visible = isActive
+        btn.BackgroundColor3 = isActive and Color3.fromRGB(24, 20, 22) or Color3.fromRGB(15, 15, 17)
+        btn.Label.TextColor3 = isActive and Color3.fromRGB(250, 250, 250) or Color3.fromRGB(150, 150, 160)
     end
-    EV  = statCell("$","EARNINGS",1)
-    ISV = statCell("#","SOLD",2)
-    BWV = statCell("W","BIDS WON",3)
+    
+    for name, frame in pairs(pageFrames) do
+        frame.Visible = (name == tabName)
+    end
 end
 
--- Toggle helper
+local function createTabButton(name, display, order)
+    local btn = Instance.new("TextButton", tabContainer)
+    btn.Name = name
+    btn.Size = UDim2.new(0.9, 0, 0, 36)
+    btn.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+    btn.BorderSizePixel = 0
+    btn.Text = ""
+    btn.LayoutOrder = order
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    
+    local indicator = Instance.new("Frame", btn)
+    indicator.Name = "Indicator"
+    indicator.Size = UDim2.new(0, 4, 1, 0)
+    indicator.BackgroundColor3 = Color3.fromRGB(235, 70, 50)
+    indicator.BorderSizePixel = 0
+    indicator.Visible = false
+    Instance.new("UICorner", indicator).CornerRadius = UDim.new(0, 2)
+    
+    local label = Instance.new("TextLabel", btn)
+    label.Name = "Label"
+    label.Size = UDim2.new(1, -16, 1, 0)
+    label.Position = UDim2.new(0, 12, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamMedium
+    label.Text = display
+    label.TextColor3 = Color3.fromRGB(150, 150, 160)
+    label.TextSize = 12
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    
+    btn.Indicator = indicator
+    btn.Label = label
+    
+    btn.MouseButton1Click:Connect(function()
+        switchTab(name)
+    end)
+    
+    tabButtons[name] = btn
+    
+    local page = Instance.new("Frame", Pages)
+    page.Name = name
+    page.Size = UDim2.fromScale(1, 1)
+    page.BackgroundTransparency = 1
+    page.Visible = false
+    pageFrames[name] = page
+    
+    return page
+end
+
+local dashboardPage = createTabButton("Dashboard", "🏠  Dashboard", 1)
+local teleportsPage = createTabButton("Teleports", "🚗  Teleports", 2)
+local autoFarmPage   = createTabButton("AutoFarm",   "🌾  Auto-Farm", 3)
+local auctionsPage   = createTabButton("Auctions",   "🔨  Auctions", 4)
+local shopPage       = createTabButton("Shop",       "💰  Pawn/Shop", 5)
+local filtersPage    = createTabButton("Filters",    "🔍  Filters", 6)
+local settingsPage   = createTabButton("Settings",   "⚙️  Settings", 7)
+
+-- Dashboard Cards Grid
+local dashboardGrid = Instance.new("Frame", dashboardPage)
+dashboardGrid.Size = UDim2.fromScale(1, 1)
+dashboardGrid.BackgroundTransparency = 1
+
+local gridLayout = Instance.new("UIGridLayout", dashboardGrid)
+gridLayout.CellSize = UDim2.new(0.5, -6, 0, 95)
+gridLayout.CellPadding = UDim2.new(0, 12, 0, 12)
+gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function createDashboardCard(title, defaultVal, order)
+    local card = Instance.new("Frame", dashboardGrid)
+    card.LayoutOrder = order
+    card.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    card.BorderSizePixel = 0
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 10)
+    
+    local cst = Instance.new("UIStroke", card)
+    cst.Color = Color3.fromRGB(235, 70, 50)
+    cst.Thickness = 1.0
+    cst.Transparency = 0.85
+    
+    local tLbl = Instance.new("TextLabel", card)
+    tLbl.Size = UDim2.new(1, -24, 0, 18)
+    tLbl.Position = UDim2.new(0, 12, 0, 12)
+    tLbl.BackgroundTransparency = 1
+    tLbl.Font = Enum.Font.GothamBold
+    tLbl.Text = title:upper()
+    tLbl.TextColor3 = Color3.fromRGB(150, 150, 160)
+    tLbl.TextSize = 10
+    
+    local vLbl = Instance.new("TextLabel", card)
+    vLbl.Size = UDim2.new(1, -24, 0, 36)
+    vLbl.Position = UDim2.new(0, 12, 0, 32)
+    vLbl.BackgroundTransparency = 1
+    vLbl.Font = Enum.Font.GothamBold
+    vLbl.Text = defaultVal
+    vLbl.TextColor3 = Color3.fromRGB(245, 245, 245)
+    vLbl.TextSize = 18
+    vLbl.TextTruncate = Enum.TextTruncate.AtEnd
+    
+    return vLbl
+end
+
+local card_status    = createDashboardCard("💻 Status", "Idle", 1)
+local card_target    = createDashboardCard("🎯 Current Target", "None", 2)
+local card_earnings  = createDashboardCard("💵 Earnings", "$0", 3)
+local card_sold      = createDashboardCard("📦 Items Sold", "0", 4)
+local card_won       = createDashboardCard("🏆 Bids Won", "0", 5)
+local card_runtime   = createDashboardCard("⏱️ Runtime", "00:00:00", 6)
+
+-- Page Scroll Containers
+local pageScrolls = {}
+local function getScrollForPage(pageFrame)
+    if pageScrolls[pageFrame] then return pageScrolls[pageFrame] end
+    local scroll = Instance.new("ScrollingFrame", pageFrame)
+    scroll.Size = UDim2.fromScale(1, 1)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 3
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(235, 70, 50)
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    
+    local layout = Instance.new("UIListLayout", scroll)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 6)
+    
+    pageScrolls[pageFrame] = scroll
+    return scroll
+end
+
+-- GUI Builders Helper Functions
+local function mkLabel(parent, txt, size, pos, tsz, font, color, zidx, xal)
+    local l = Instance.new("TextLabel", parent)
+    l.Size = size; l.Position = pos
+    l.BackgroundTransparency = 1
+    l.Text = txt; l.TextSize = tsz or 13
+    l.Font = font or Enum.Font.Gotham
+    l.TextColor3 = color or Color3.new(1,1,1)
+    l.ZIndex = zidx or 1
+    l.TextXAlignment = xal or Enum.TextXAlignment.Left
+    return l
+end
+
 local nextOrder = 10
--- Registry of GUI controls for the Profiles/Save-Settings feature.
--- Each control registers { get=fn()->value, set=fn(value) } keyed by its label
--- (or an explicit key). Save reads every get(); Load applies every set().
 local controls = {}
--- ── Grouped columns: Crab Tycoon / Chicken Farm landscape layout ──
--- Controls route into the column for their section (set by section()).
--- Kept inside a do-block so only currentCol/SECTION_COL use a local slot
--- (the GUI chunk is near Luau's 200-locals-per-function cap).
 local currentCol
-local SECTION_COL
-do
-    local columnsRow = Instance.new("Frame", SC)
-    columnsRow.Size = UDim2.new(1,0,0,0)
-    columnsRow.AutomaticSize = Enum.AutomaticSize.Y
-    columnsRow.BackgroundTransparency = 1
-    columnsRow.LayoutOrder = 5
-    local crl = Instance.new("UIListLayout", columnsRow)
-    crl.FillDirection = Enum.FillDirection.Horizontal
-    crl.Padding = UDim.new(0,8)
-    crl.VerticalAlignment = Enum.VerticalAlignment.Top
-    crl.SortOrder = Enum.SortOrder.LayoutOrder
-    local COLS = {}
-    for i = 1, 3 do
-        local c = Instance.new("Frame", columnsRow)
-        c.Size = UDim2.new(1/3,-6,0,0)
-        c.AutomaticSize = Enum.AutomaticSize.Y
-        c.BackgroundTransparency = 1
-        c.LayoutOrder = i
-        local cl = Instance.new("UIListLayout", c)
-        cl.SortOrder = Enum.SortOrder.LayoutOrder
-        cl.Padding = UDim.new(0,6)
-        COLS[i] = c
-    end
-    currentCol = COLS[1]
-    SECTION_COL = {
-        ["TELEPORTS"]=COLS[1], ["AUTO-FARM"]=COLS[1],
-        ["AUCTION"]=COLS[2], ["Auto"]=COLS[2], ["Shop"]=COLS[2],
-        ["Auto Pick-Up Filters"]=COLS[3], ["PLAYER"]=COLS[3], ["SETTINGS"]=COLS[3], ["PROFILES"]=COLS[3],
-    }
-end
+
 local function section(txt)
-    currentCol = SECTION_COL[txt] or currentCol
-    local holder = Instance.new("Frame",currentCol)
-    holder.Size = UDim2.new(1,0,0,24)
+    local holder = Instance.new("Frame", currentCol)
+    holder.Size = UDim2.new(1, 0, 0, 24)
     holder.BackgroundTransparency = 1
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    local div = Instance.new("Frame",holder)
-    div.Size = UDim2.new(1,0,0,1); div.Position = UDim2.new(0,0,0,1)
-    div.BackgroundColor3 = Color3.fromRGB(200,30,40); div.BackgroundTransparency = 0.4; div.BorderSizePixel = 0
-    local l = Instance.new("TextLabel",holder)
-    l.Size = UDim2.new(1,-4,0,18); l.Position = UDim2.new(0,2,0,7)
+    
+    local l = Instance.new("TextLabel", holder)
+    l.Size = UDim2.new(1, -12, 1, 0)
+    l.Position = UDim2.new(0, 10, 0, 0)
     l.BackgroundTransparency = 1
     l.Text = string.upper(txt)
-    l.TextColor3 = Color3.fromRGB(255,70,80)
-    l.TextSize = 12; l.Font = Enum.Font.GothamBold
+    l.TextColor3 = Color3.fromRGB(235, 70, 50)
+    l.TextSize = 11
+    l.Font = Enum.Font.GothamBold
     l.TextXAlignment = Enum.TextXAlignment.Left
 end
 
 local function toggle(icon, txt, onFn, key)
-    local row = Instance.new("Frame",currentCol)
-    row.Size = UDim2.new(1,0,0,32)
-    row.BackgroundColor3 = Color3.fromRGB(45,45,52)
+    local row = Instance.new("Frame", currentCol)
+    row.Size = UDim2.new(1, 0, 0, 38)
+    row.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
-    local rst = Instance.new("UIStroke",row); rst.Color = Color3.fromRGB(200,30,40); rst.Transparency = 0.6; rst.Thickness = 1
-    local txl = mkLabel(row,txt,UDim2.new(1,-46,1,0),UDim2.new(0,10,0,0),12,Enum.Font.GothamMedium,Color3.fromRGB(235,235,240),1,Enum.TextXAlignment.Left)
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.85; rst.Thickness = 1
+    
+    local txl = mkLabel(row, txt, UDim2.new(1, -56, 1, 0), UDim2.new(0, 12, 0, 0), 12, Enum.Font.GothamMedium, Color3.fromRGB(235, 235, 240), 1, Enum.TextXAlignment.Left)
     txl.TextTruncate = Enum.TextTruncate.AtEnd
-
-    local track = Instance.new("Frame",row)
-    track.Size = UDim2.new(0,34,0,18)
-    track.Position = UDim2.new(1,-40,0.5,-9)
-    track.BackgroundColor3 = Color3.fromRGB(35,35,40)
+    
+    local track = Instance.new("Frame", row)
+    track.Size = UDim2.new(0, 36, 0, 20)
+    track.Position = UDim2.new(1, -48, 0.5, -10)
+    track.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
     track.BorderSizePixel = 0
-    Instance.new("UICorner",track).CornerRadius = UDim.new(1,0)
-    local thumb = Instance.new("Frame",track)
-    thumb.Size = UDim2.new(0,14,0,14)
-    thumb.Position = UDim2.new(0,2,0.5,-7)
-    thumb.BackgroundColor3 = Color3.fromRGB(120,120,130)
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+    local thumb = Instance.new("Frame", track)
+    thumb.Size = UDim2.new(0, 14, 0, 14)
+    thumb.Position = UDim2.new(0, 3, 0.5, -7)
+    thumb.BackgroundColor3 = Color3.fromRGB(120, 120, 130)
     thumb.BorderSizePixel = 0
-    Instance.new("UICorner",thumb).CornerRadius = UDim.new(1,0)
-
+    Instance.new("UICorner", thumb).CornerRadius = UDim.new(1, 0)
+    
     local on = false
     local ti = TweenInfo.new(0.16, Enum.EasingStyle.Quad)
-    local btn = Instance.new("TextButton",row)
-    btn.Size = UDim2.new(1,0,1,0)
+    local btn = Instance.new("TextButton", row)
+    btn.Size = UDim2.new(1, 0, 1, 0)
     btn.BackgroundTransparency = 1; btn.Text = ""
-
+    
     local function set(state)
         on = state
         if on then
-            TweenService:Create(track,ti,{BackgroundColor3=Color3.fromRGB(220,40,50)}):Play()
-            TweenService:Create(thumb,ti,{Position=UDim2.new(0,18,0.5,-7),BackgroundColor3=Color3.new(1,1,1)}):Play()
-            row.BackgroundColor3 = Color3.fromRGB(60,22,26); rst.Transparency = 0.1
+            TweenService:Create(track, ti, {BackgroundColor3 = Color3.fromRGB(235, 70, 50)}):Play()
+            TweenService:Create(thumb, ti, {Position = UDim2.new(0, 19, 0.5, -7), BackgroundColor3 = Color3.new(1, 1, 1)}):Play()
+            row.BackgroundColor3 = Color3.fromRGB(28, 20, 22); rst.Transparency = 0.65
         else
-            TweenService:Create(track,ti,{BackgroundColor3=Color3.fromRGB(35,35,40)}):Play()
-            TweenService:Create(thumb,ti,{Position=UDim2.new(0,2,0.5,-7),BackgroundColor3=Color3.fromRGB(120,120,130)}):Play()
-            row.BackgroundColor3 = Color3.fromRGB(45,45,52); rst.Transparency = 0.6
+            TweenService:Create(track, ti, {BackgroundColor3 = Color3.fromRGB(35, 35, 40)}):Play()
+            TweenService:Create(thumb, ti, {Position = UDim2.new(0, 3, 0.5, -7), BackgroundColor3 = Color3.fromRGB(120, 120, 130)}):Play()
+            row.BackgroundColor3 = Color3.fromRGB(20, 20, 24); rst.Transparency = 0.85
         end
         onFn(on)
     end
     btn.MouseButton1Click:Connect(function() set(not on) end)
+    
     local defaultState = false
     if key and State[key] ~= nil then
         defaultState = State[key]
@@ -3177,6 +3362,7 @@ local function toggle(icon, txt, onFn, key)
         defaultState = State[txt]
     end
     set(defaultState)
+    
     controls[key or txt] = {
         get = function() return on end,
         set = function(v) set(v and true or false) end,
@@ -3184,127 +3370,35 @@ local function toggle(icon, txt, onFn, key)
     return set
 end
 
-local function actionBtn(txt, color, fn)
-    local row = Instance.new("Frame",currentCol)
-    row.Size = UDim2.new(1,0,0,36)
-    row.BackgroundTransparency = 1
-    row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    row.Parent = SC
-    local b = Instance.new("TextButton",row)
-    b.Size = UDim2.new(1,-4,1,-8)
-    b.Position = UDim2.new(0,2,0,4)
-    b.BackgroundColor3 = color
-    b.Text = txt; b.TextColor3 = Color3.new(1,1,1)
-    b.TextSize = 12; b.Font = Enum.Font.GothamBold
-    b.BorderSizePixel = 0
-    Instance.new("UICorner",b).CornerRadius = UDim.new(0,7)
-    b.MouseButton1Click:Connect(function()
-        TweenService:Create(b,TweenInfo.new(0.08),{BackgroundColor3=Color3.fromRGB(255,30,30)}):Play()
-        task.delay(0.15,function() TweenService:Create(b,TweenInfo.new(0.1),{BackgroundColor3=color}):Play() end)
-        fn()
-    end)
-end
-
-local function slider(lbl, minV, maxV, defV, fn, key)
-    local row = Instance.new("Frame",currentCol)
-    row.Size = UDim2.new(1,0,0,52)
-    row.BackgroundColor3 = Color3.fromRGB(45,45,52)
-    row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,9)
-
-    mkLabel(row,lbl,UDim2.new(0.58,0,0,20),UDim2.new(0,10,0,4),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
-    local vl = mkLabel(row,tostring(defV),UDim2.new(0.38,0,0,20),UDim2.new(0.6,0,0,4),12,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),1,Enum.TextXAlignment.Right)
-
-    local trk = Instance.new("Frame",row)
-    trk.Size = UDim2.new(1,-20,0,6)
-    trk.Position = UDim2.new(0,10,0,34)
-    trk.BackgroundColor3 = Color3.fromRGB(24,24,24)
-    trk.BorderSizePixel = 0
-    Instance.new("UICorner",trk).CornerRadius = UDim.new(1,0)
-    local pct = (defV-minV)/(maxV-minV)
-    local fl = Instance.new("Frame",trk)
-    fl.Size = UDim2.new(pct,0,1,0)
-    fl.BackgroundColor3 = Color3.fromRGB(220,20,20)
-    fl.BorderSizePixel = 0
-    Instance.new("UICorner",fl).CornerRadius = UDim.new(1,0)
-    local th = Instance.new("TextButton",trk)
-    th.Size = UDim2.new(0,14,0,14)
-    th.Position = UDim2.new(pct,-7,0.5,-7)
-    th.BackgroundColor3 = Color3.fromRGB(240,240,240)
-    th.Text = ""; th.BorderSizePixel = 0; th.ZIndex = 2
-    Instance.new("UICorner",th).CornerRadius = UDim.new(1,0)
-
-    local function setSlider(v)
-        v = math.clamp(math.floor(tonumber(v) or defV), minV, maxV)
-        local r = (v - minV)/(maxV - minV)
-        fl.Size = UDim2.new(r,0,1,0)
-        th.Position = UDim2.new(r,-7,0.5,-7)
-        vl.Text = tostring(v); fn(v)
-    end
-
-    local drag = false
-    th.MouseButton1Down:Connect(function() drag = true end)
-    track(UserInputService.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = false end
-    end))
-    track(RunService.RenderStepped:Connect(function()
-        if not drag then return end
-        local r = math.clamp((UserInputService:GetMouseLocation().X - trk.AbsolutePosition.X)/trk.AbsoluteSize.X,0,1)
-        setSlider(minV + r*(maxV-minV))
-    end))
-    controls[key or lbl] = {
-        get = function() return tonumber(vl.Text) or defV end,
-        set = setSlider,
-    }
-end
-
--- Compact checkbox row for checklists (rarity / mutation)
-local function checkRow(labelText, getState, setState, indent)
-    local row = Instance.new("Frame",currentCol)
-    row.Size = UDim2.new(1,0,0,26)
-    row.BackgroundColor3 = Color3.fromRGB(10,10,10)
-    row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
-    local x = indent or 12
-    local box = Instance.new("Frame",row)
-    box.Size = UDim2.new(0,16,0,16)
-    box.Position = UDim2.new(0,x,0.5,-8)
-    box.BorderSizePixel = 0
-    Instance.new("UICorner",box).CornerRadius = UDim.new(0,4)
-    local check = mkLabel(box,"",UDim2.new(1,0,1,0),UDim2.new(0,0,0,-1),13,Enum.Font.GothamBold,Color3.new(1,1,1),2,Enum.TextXAlignment.Center)
-    mkLabel(row,labelText,UDim2.new(1,-(x+30),1,0),UDim2.new(0,x+24,0,0),11,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
-    local btn = Instance.new("TextButton",row)
-    btn.Size = UDim2.new(1,0,1,0); btn.BackgroundTransparency = 1; btn.Text = ""
-    local function refresh()
-        local on = getState()
-        box.BackgroundColor3 = on and Color3.fromRGB(220,20,20) or Color3.fromRGB(24,24,24)
-        check.Text = on and "X" or ""
-    end
-    btn.MouseButton1Click:Connect(function() setState(not getState()); refresh() end)
-    refresh()
-    return refresh
-end
-
--- Number input row (typed value, no slider cap) for things like Min Price
 local function numberInput(labelText, default, onChange, key)
-    local row = Instance.new("Frame",currentCol)
-    row.Size = UDim2.new(1,0,0,38)
-    row.BackgroundColor3 = Color3.fromRGB(45,45,52)
+    local row = Instance.new("Frame", currentCol)
+    row.Size = UDim2.new(1, 0, 0, 38)
+    row.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
-    mkLabel(row,labelText,UDim2.new(0.55,0,1,0),UDim2.new(0,12,0,0),12,nil,Color3.fromRGB(180,180,180),1,Enum.TextXAlignment.Left)
-    local box = Instance.new("TextBox",row)
-    box.Size = UDim2.new(0,96,0,24); box.Position = UDim2.new(1,-106,0.5,-12)
-    box.BackgroundColor3 = Color3.fromRGB(20,20,20); box.BorderSizePixel = 0
-    box.Text = tostring(default); box.TextColor3 = Color3.new(1,1,1); box.TextSize = 12
-    box.Font = Enum.Font.GothamBold; box.ClearTextOnFocus = false
-    box.PlaceholderText = "any number"
-    Instance.new("UICorner",box).CornerRadius = UDim.new(0,6)
-    local st = Instance.new("UIStroke",box); st.Color = Color3.fromRGB(220,20,20); st.Transparency = 0.6; st.Thickness = 1
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.85; rst.Thickness = 1
+    
+    mkLabel(row, labelText, UDim2.new(0.55, 0, 1, 0), UDim2.new(0, 12, 0, 0), 12, nil, Color3.fromRGB(180, 180, 180), 1, Enum.TextXAlignment.Left)
+    
+    local box = Instance.new("TextBox", row)
+    box.Size = UDim2.fromOffset(96, 24)
+    box.Position = UDim2.new(1, -108, 0.5, -12)
+    box.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+    box.BorderSizePixel = 0
+    box.Text = tostring(default)
+    box.TextColor3 = Color3.new(1, 1, 1)
+    box.TextSize = 12
+    box.Font = Enum.Font.GothamBold
+    box.ClearTextOnFocus = false
+    box.PlaceholderText = "number"
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+    local st = Instance.new("UIStroke", box); st.Color = Color3.fromRGB(235, 70, 50); st.Transparency = 0.6; st.Thickness = 1
+    
     box.FocusLost:Connect(function()
         local n = tonumber(box.Text)
         if n then onChange(n); box.Text = tostring(n) else box.Text = tostring(default) end
     end)
+    
     controls[key or labelText] = {
         get = function() return tonumber(box.Text) or default end,
         set = function(v) local n = tonumber(v) or default; box.Text = tostring(n); onChange(n) end,
@@ -3312,157 +3406,155 @@ local function numberInput(labelText, default, onChange, key)
     return box
 end
 
--- Read-only label row for status displays (e.g. Quick Sell Rate)
 local function labelRow(labelText, defaultVal)
-    local row = Instance.new("Frame",currentCol)
-    row.Size = UDim2.new(1,0,0,36)
-    row.BackgroundColor3 = Color3.fromRGB(45,45,52)
+    local row = Instance.new("Frame", currentCol)
+    row.Size = UDim2.new(1, 0, 0, 36)
+    row.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",row).CornerRadius = UDim.new(0,8)
-    local rst = Instance.new("UIStroke",row); rst.Color = Color3.fromRGB(220,20,20); rst.Transparency = 0.95; rst.Thickness = 1
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.9; rst.Thickness = 1
     
-    mkLabel(row, labelText, UDim2.new(0.6,0,1,0), UDim2.new(0,12,0,0), 12, nil, Color3.fromRGB(180,180,180), 1, Enum.TextXAlignment.Left)
-    local valLabel = mkLabel(row, defaultVal, UDim2.new(0.35,0,1,0), UDim2.new(0.6,0,0,0), 12, Enum.Font.GothamBold, Color3.fromRGB(220,20,20), 1, Enum.TextXAlignment.Right)
+    mkLabel(row, labelText, UDim2.new(0.6, 0, 1, 0), UDim2.new(0, 12, 0, 0), 12, nil, Color3.fromRGB(180, 180, 180), 1, Enum.TextXAlignment.Left)
+    local valLabel = mkLabel(row, defaultVal, UDim2.new(0.35, 0, 1, 0), UDim2.new(0.6, 0, 0, 0), 12, Enum.Font.GothamBold, Color3.fromRGB(235, 70, 50), 1, Enum.TextXAlignment.Right)
     
     return valLabel
 end
 
--- Collapsible dropdown holding a checklist (space-saving, modern)
--- items: array of names ; getState(name)->bool ; setState(name,bool)
 local function dropdown(titleText, items, getState, setState, key)
-    local rowH = 26
+    local rowH = 28
     local contentH = 30 * #items + 34
     local headH = 40
-
+    
     local holder = Instance.new("Frame", currentCol)
-    holder.Size = UDim2.new(1,0,0,headH)
-    holder.BackgroundColor3 = Color3.fromRGB(45,45,52)
+    holder.Size = UDim2.new(1, 0, 0, headH)
+    holder.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
     holder.BorderSizePixel = 0
     holder.ClipsDescendants = true
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",holder).CornerRadius = UDim.new(0,10)
-    local hst = Instance.new("UIStroke",holder); hst.Color = Color3.fromRGB(220,20,20); hst.Transparency = 0.8; hst.Thickness = 1
-
-    local head = Instance.new("Frame",holder)
-    head.Size = UDim2.new(1,0,0,headH); head.BackgroundTransparency = 1
-    mkLabel(head,titleText,UDim2.new(1,-90,1,0),UDim2.new(0,14,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),2)
-    local badge = mkLabel(head,"",UDim2.new(0,48,1,0),UDim2.new(1,-72,0,0),11,Enum.Font.GothamBold,Color3.fromRGB(220,20,20),2,Enum.TextXAlignment.Right)
-    local chev = mkLabel(head,"v",UDim2.new(0,20,1,0),UDim2.new(1,-26,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(140,140,140),2,Enum.TextXAlignment.Center)
-    local hbtn = Instance.new("TextButton",head)
-    hbtn.Size = UDim2.new(1,0,1,0); hbtn.BackgroundTransparency = 1; hbtn.Text = ""; hbtn.ZIndex = 3
-
-    local content = Instance.new("Frame",holder)
-    content.Position = UDim2.new(0,0,0,headH); content.Size = UDim2.new(1,0,0,contentH)
+    Instance.new("UICorner", holder).CornerRadius = UDim.new(0, 10)
+    local hst = Instance.new("UIStroke", holder); hst.Color = Color3.fromRGB(235, 70, 50); hst.Transparency = 0.85; hst.Thickness = 1
+    
+    local head = Instance.new("Frame", holder)
+    head.Size = UDim2.new(1, 0, 0, headH); head.BackgroundTransparency = 1
+    mkLabel(head, titleText, UDim2.new(1, -90, 1, 0), UDim2.new(0, 14, 0, 0), 12, Enum.Font.GothamBold, Color3.fromRGB(200, 200, 200), 2)
+    local badge = mkLabel(head, "", UDim2.new(0, 48, 1, 0), UDim2.new(1, -72, 0, 0), 11, Enum.Font.GothamBold, Color3.fromRGB(235, 70, 50), 2, Enum.TextXAlignment.Right)
+    local chev = mkLabel(head, "v", UDim2.new(0, 20, 1, 0), UDim2.new(1, -26, 0, 0), 12, Enum.Font.GothamBold, Color3.fromRGB(140, 140, 140), 2, Enum.TextXAlignment.Center)
+    local hbtn = Instance.new("TextButton", head)
+    hbtn.Size = UDim2.new(1, 0, 1, 0); hbtn.BackgroundTransparency = 1; hbtn.Text = ""; hbtn.ZIndex = 3
+    
+    local content = Instance.new("Frame", holder)
+    content.Position = UDim2.new(0, 0, 0, headH); content.Size = UDim2.new(1, 0, 0, contentH)
     content.BackgroundTransparency = 1
-    local cl = Instance.new("UIListLayout",content); cl.SortOrder = Enum.SortOrder.LayoutOrder; cl.Padding = UDim.new(0,4)
-    local cpad = Instance.new("UIPadding",content)
-    cpad.PaddingTop = UDim.new(0,2); cpad.PaddingLeft = UDim.new(0,8); cpad.PaddingRight = UDim.new(0,8)
-
+    local cl = Instance.new("UIListLayout", content); cl.SortOrder = Enum.SortOrder.LayoutOrder; cl.Padding = UDim.new(0, 4)
+    local cpad = Instance.new("UIPadding", content)
+    cpad.PaddingTop = UDim.new(0, 2); cpad.PaddingLeft = UDim.new(0, 8); cpad.PaddingRight = UDim.new(0, 8)
+    
     local refreshers = {}
     local function updateBadge()
-        local c = 0; for _,it in ipairs(items) do if getState(it) then c = c + 1 end end
-        badge.Text = c.."/"..#items
+        local c = 0; for _, it in ipairs(items) do if getState(it) then c = c + 1 end end
+        badge.Text = c .. "/" .. #items
     end
-
-    local quick = Instance.new("Frame",content)
-    quick.Size = UDim2.new(1,0,0,24); quick.BackgroundTransparency = 1; quick.LayoutOrder = 0
-    local function quickBtn(txt,xs,fn)
-        local b = Instance.new("TextButton",quick)
-        b.Size = UDim2.new(0,54,1,0); b.Position = UDim2.new(0,xs,0,0)
-        b.BackgroundColor3 = Color3.fromRGB(24,24,24); b.BorderSizePixel = 0
-        b.Text = txt; b.TextColor3 = Color3.fromRGB(180,180,180); b.TextSize = 10; b.Font = Enum.Font.GothamBold
-        Instance.new("UICorner",b).CornerRadius = UDim.new(0,6)
+    
+    local quick = Instance.new("Frame", content)
+    quick.Size = UDim2.new(1, 0, 0, 24); quick.BackgroundTransparency = 1; quick.LayoutOrder = 0
+    local function quickBtn(txt, xs, fn)
+        local b = Instance.new("TextButton", quick)
+        b.Size = UDim2.fromOffset(54, 24); b.Position = UDim2.fromOffset(xs, 0)
+        b.BackgroundColor3 = Color3.fromRGB(12, 12, 14); b.BorderSizePixel = 0
+        b.Text = txt; b.TextColor3 = Color3.fromRGB(180, 180, 180); b.TextSize = 10; b.Font = Enum.Font.GothamBold
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
         b.MouseButton1Click:Connect(fn)
     end
-    quickBtn("All",0,function() for _,it in ipairs(items) do setState(it,true) end for _,r in ipairs(refreshers) do r() end updateBadge() end)
-    quickBtn("None",60,function() for _,it in ipairs(items) do setState(it,false) end for _,r in ipairs(refreshers) do r() end updateBadge() end)
-
-    for i,it in ipairs(items) do
-        local row = Instance.new("Frame",content)
-        row.Size = UDim2.new(1,0,0,rowH); row.BackgroundColor3 = Color3.fromRGB(16,16,16); row.BorderSizePixel = 0; row.LayoutOrder = i
-        Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
-        local cb = Instance.new("Frame",row)
-        cb.Size = UDim2.new(0,16,0,16); cb.Position = UDim2.new(0,8,0.5,-8); cb.BorderSizePixel = 0
-        Instance.new("UICorner",cb).CornerRadius = UDim.new(0,4)
-        local ck = mkLabel(cb,"",UDim2.new(1,0,1,0),UDim2.new(0,0,0,-1),12,Enum.Font.GothamBold,Color3.new(1,1,1),2,Enum.TextXAlignment.Center)
-        mkLabel(row,it,UDim2.new(1,-34,1,0),UDim2.new(0,32,0,0),11,nil,Color3.fromRGB(180,180,180),1)
-        local rb = Instance.new("TextButton",row); rb.Size = UDim2.new(1,0,1,0); rb.BackgroundTransparency = 1; rb.Text = ""
+    quickBtn("All", 0, function() for _, it in ipairs(items) do setState(it, true) end for _, r in ipairs(refreshers) do r() end updateBadge() end)
+    quickBtn("None", 60, function() for _, it in ipairs(items) do setState(it, false) end for _, r in ipairs(refreshers) do r() end updateBadge() end)
+    
+    for i, it in ipairs(items) do
+        local row = Instance.new("Frame", content)
+        row.Size = UDim2.new(1, 0, 0, rowH); row.BackgroundColor3 = Color3.fromRGB(12, 12, 14); row.BorderSizePixel = 0; row.LayoutOrder = i
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+        local cb = Instance.new("Frame", row)
+        cb.Size = UDim2.fromOffset(16, 16); cb.Position = UDim2.new(0, 8, 0.5, -8); cb.BorderSizePixel = 0
+        Instance.new("UICorner", cb).CornerRadius = UDim.new(0, 4)
+        local ck = mkLabel(cb, "", UDim2.fromScale(1, 1), UDim2.new(0, 0, 0, -1), 12, Enum.Font.GothamBold, Color3.new(1, 1, 1), 2, Enum.TextXAlignment.Center)
+        mkLabel(row, it, UDim2.new(1, -34, 1, 0), UDim2.new(0, 32, 0, 0), 11, nil, Color3.fromRGB(180, 180, 180), 1)
+        local rb = Instance.new("TextButton", row); rb.Size = UDim2.fromScale(1, 1); rb.BackgroundTransparency = 1; rb.Text = ""
         local function rf()
             local on = getState(it)
-            cb.BackgroundColor3 = on and Color3.fromRGB(220,20,20) or Color3.fromRGB(28,28,28)
+            cb.BackgroundColor3 = on and Color3.fromRGB(235, 70, 50) or Color3.fromRGB(28, 28, 32)
             ck.Text = on and "X" or ""
         end
         rb.MouseButton1Click:Connect(function() setState(it, not getState(it)); rf(); updateBadge() end)
-        refreshers[#refreshers+1] = rf
+        refreshers[#refreshers + 1] = rf
         rf()
     end
     updateBadge()
-
+    
     local open = false
     hbtn.MouseButton1Click:Connect(function()
         open = not open
         local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
-        TweenService:Create(holder,ti,{Size = UDim2.new(1,0,0, open and (headH+contentH) or headH)}):Play()
+        TweenService:Create(holder, ti, {Size = UDim2.new(1, 0, 0, open and (headH + contentH) or headH)}):Play()
         chev.Text = open and "^" or "v"
     end)
+    
     controls[key or titleText] = {
         get = function()
             local t = {}
-            for _,it in ipairs(items) do t[it] = getState(it) and true or false end
+            for _, it in ipairs(items) do t[it] = getState(it) and true or false end
             return t
         end,
         set = function(tbl)
             if type(tbl) ~= "table" then return end
-            for _,it in ipairs(items) do setState(it, tbl[it] == true) end
-            for _,r in ipairs(refreshers) do r() end
+            for _, it in ipairs(items) do setState(it, tbl[it] == true) end
+            for _, r in ipairs(refreshers) do r() end
             updateBadge()
         end,
     }
 end
 
 local function teleportDropdown(titleText, items, onSelect)
-    local rowH = 26
+    local rowH = 28
     local contentH = 30 * #items + 10
     local headH = 40
-
+    
     local holder = Instance.new("Frame", currentCol)
-    holder.Size = UDim2.new(1,0,0,headH)
-    holder.BackgroundColor3 = Color3.fromRGB(45,45,52)
+    holder.Size = UDim2.new(1, 0, 0, headH)
+    holder.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
     holder.BorderSizePixel = 0
     holder.ClipsDescendants = true
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",holder).CornerRadius = UDim.new(0,10)
-    local hst = Instance.new("UIStroke",holder); hst.Color = Color3.fromRGB(220,20,20); hst.Transparency = 0.8; hst.Thickness = 1
-
-    local head = Instance.new("Frame",holder)
-    head.Size = UDim2.new(1,0,0,headH); head.BackgroundTransparency = 1
-    mkLabel(head,titleText,UDim2.new(1,-60,1,0),UDim2.new(0,14,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(200,200,200),2)
-    local chev = mkLabel(head,"v",UDim2.new(0,20,1,0),UDim2.new(1,-26,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(140,140,140),2,Enum.TextXAlignment.Center)
-    local hbtn = Instance.new("TextButton",head)
-    hbtn.Size = UDim2.new(1,0,1,0); hbtn.BackgroundTransparency = 1; hbtn.Text = ""; hbtn.ZIndex = 3
-
-    local content = Instance.new("Frame",holder)
-    content.Position = UDim2.new(0,0,0,headH); content.Size = UDim2.new(1,0,0,contentH)
+    Instance.new("UICorner", holder).CornerRadius = UDim.new(0, 10)
+    local hst = Instance.new("UIStroke", holder); hst.Color = Color3.fromRGB(235, 70, 50); hst.Transparency = 0.85; hst.Thickness = 1
+    
+    local head = Instance.new("Frame", holder)
+    head.Size = UDim2.new(1, 0, 0, headH); head.BackgroundTransparency = 1
+    mkLabel(head, titleText, UDim2.new(1, -60, 1, 0), UDim2.new(0, 14, 0, 0), 12, Enum.Font.GothamBold, Color3.fromRGB(200, 200, 200), 2)
+    local chev = mkLabel(head, "v", UDim2.new(0, 20, 1, 0), UDim2.new(1, -26, 0, 0), 12, Enum.Font.GothamBold, Color3.fromRGB(140, 140, 140), 2, Enum.TextXAlignment.Center)
+    local hbtn = Instance.new("TextButton", head)
+    hbtn.Size = UDim2.new(1, 0, 1, 0); hbtn.BackgroundTransparency = 1; hbtn.Text = ""; hbtn.ZIndex = 3
+    
+    local content = Instance.new("Frame", holder)
+    content.Position = UDim2.new(0, 0, 0, headH); content.Size = UDim2.new(1, 0, 0, contentH)
     content.BackgroundTransparency = 1
-    local cl = Instance.new("UIListLayout",content); cl.SortOrder = Enum.SortOrder.LayoutOrder; cl.Padding = UDim.new(0,4)
-    local cpad = Instance.new("UIPadding",content)
-    cpad.PaddingTop = UDim.new(0,2); cpad.PaddingLeft = UDim.new(0,8); cpad.PaddingRight = UDim.new(0,8)
-
+    local cl = Instance.new("UIListLayout", content); cl.SortOrder = Enum.SortOrder.LayoutOrder; cl.Padding = UDim.new(0, 4)
+    local cpad = Instance.new("UIPadding", content)
+    cpad.PaddingTop = UDim.new(0, 2); cpad.PaddingLeft = UDim.new(0, 8); cpad.PaddingRight = UDim.new(0, 8)
+    
     local open = false
     local function toggleOpen()
         open = not open
         local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
-        TweenService:Create(holder,ti,{Size = UDim2.new(1,0,0, open and (headH+contentH) or headH)}):Play()
+        TweenService:Create(holder, ti, {Size = UDim2.new(1, 0, 0, open and (headH + contentH) or headH)}):Play()
         chev.Text = open and "^" or "v"
     end
     hbtn.MouseButton1Click:Connect(toggleOpen)
-
+    
     for i, it in ipairs(items) do
-        local row = Instance.new("Frame",content)
-        row.Size = UDim2.new(1,0,0,rowH); row.BackgroundColor3 = Color3.fromRGB(16,16,16); row.BorderSizePixel = 0; row.LayoutOrder = i
-        Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
-        mkLabel(row,">  " .. it,UDim2.new(1,-16,1,0),UDim2.new(0,10,0,0),11,Enum.Font.GothamBold,Color3.fromRGB(180,180,180),1)
-        local rb = Instance.new("TextButton",row); rb.Size = UDim2.new(1,0,1,0); rb.BackgroundTransparency = 1; rb.Text = ""
+        local row = Instance.new("Frame", content)
+        row.Size = UDim2.new(1, 0, 0, rowH); row.BackgroundColor3 = Color3.fromRGB(12, 12, 14); row.BorderSizePixel = 0; row.LayoutOrder = i
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+        mkLabel(row, ">  " .. it, UDim2.new(1, -16, 1, 0), UDim2.new(0, 10, 0, 0), 11, Enum.Font.GothamBold, Color3.fromRGB(180, 180, 180), 1)
+        local rb = Instance.new("TextButton", row); rb.Size = UDim2.fromScale(1, 1); rb.BackgroundTransparency = 1; rb.Text = ""
         rb.MouseButton1Click:Connect(function()
             toggleOpen()
             onSelect(it)
@@ -3470,14 +3562,95 @@ local function teleportDropdown(titleText, items, onSelect)
     end
 end
 
--- Build toggles
+local function actionBtn(txt, color, fn)
+    local row = Instance.new("Frame", currentCol)
+    row.Size = UDim2.new(1, 0, 0, 38)
+    row.BackgroundTransparency = 1
+    row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    
+    local b = Instance.new("TextButton", row)
+    b.Size = UDim2.new(1, 0, 1, 0)
+    b.BackgroundColor3 = color
+    b.Text = txt; b.TextColor3 = Color3.new(1, 1, 1)
+    b.TextSize = 12; b.Font = Enum.Font.GothamBold
+    b.BorderSizePixel = 0
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+    
+    b.MouseButton1Click:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.08), {BackgroundColor3 = Color3.fromRGB(255, 30, 30)}):Play()
+        task.delay(0.15, function() TweenService:Create(b, TweenInfo.new(0.1), {BackgroundColor3 = color}):Play() end)
+        fn()
+    end)
+end
+
+local function slider(lbl, minV, maxV, defV, fn, key)
+    local row = Instance.new("Frame", currentCol)
+    row.Size = UDim2.new(1, 0, 0, 54)
+    row.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.85; rst.Thickness = 1
+    
+    mkLabel(row, lbl, UDim2.new(0.58, 0, 0, 20), UDim2.new(0, 12, 0, 4), 12, nil, Color3.fromRGB(180, 180, 180), 1, Enum.TextXAlignment.Left)
+    local vl = mkLabel(row, tostring(defV), UDim2.new(0.38, 0, 0, 20), UDim2.new(0.6, 0, 0, 4), 12, Enum.Font.GothamBold, Color3.fromRGB(235, 70, 50), 1, Enum.TextXAlignment.Right)
+    
+    local trk = Instance.new("Frame", row)
+    trk.Size = UDim2.new(1, -24, 0, 6)
+    trk.Position = UDim2.new(0, 12, 0, 36)
+    trk.BackgroundColor3 = Color3.fromRGB(30, 30, 36)
+    trk.BorderSizePixel = 0
+    Instance.new("UICorner", trk).CornerRadius = UDim.new(1, 0)
+    
+    local pct = (defV - minV) / (maxV - minV)
+    local fl = Instance.new("Frame", trk)
+    fl.Size = UDim2.new(pct, 0, 1, 0)
+    fl.BackgroundColor3 = Color3.fromRGB(235, 70, 50)
+    fl.BorderSizePixel = 0
+    Instance.new("UICorner", fl).CornerRadius = UDim.new(1, 0)
+    
+    local th = Instance.new("TextButton", trk)
+    th.Size = UDim2.fromOffset(14, 14)
+    th.Position = UDim2.new(pct, -7, 0.5, -7)
+    th.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+    th.Text = ""; th.BorderSizePixel = 0; th.ZIndex = 2
+    Instance.new("UICorner", th).CornerRadius = UDim.new(1, 0)
+    
+    local function setSlider(v)
+        v = math.clamp(math.floor(tonumber(v) or defV), minV, maxV)
+        local r = (v - minV) / (maxV - minV)
+        fl.Size = UDim2.new(r, 0, 1, 0)
+        th.Position = UDim2.new(r, -7, 0.5, -7)
+        vl.Text = tostring(v); fn(v)
+    end
+    
+    local drag = false
+    th.MouseButton1Down:Connect(function() drag = true end)
+    track(UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = false end
+    end))
+    track(RunService.RenderStepped:Connect(function()
+        if not drag then return end
+        local r = math.clamp((UserInputService:GetMouseLocation().X - trk.AbsolutePosition.X) / trk.AbsoluteSize.X, 0, 1)
+        setSlider(minV + r * (maxV - minV))
+    end))
+    
+    controls[key or lbl] = {
+        get = function() return tonumber(vl.Text) or defV end,
+        set = setSlider,
+    }
+end
+
+-- Teleports Page Builder
+currentCol = getScrollForPage(teleportsPage)
 section("TELEPORTS")
 teleportDropdown("Select Location to Teleport", getTeleportLocationsList(), function(selectedName)
     performTeleport(selectedName)
 end)
 
+-- AutoFarm Page Builder
+currentCol = getScrollForPage(autoFarmPage)
 section("AUTO-FARM")
-toggle("✦", "Auto Farm Loop", function(on)
+toggle("🌾", "Auto Farm Loop", function(on)
     State.AutoContainerFarm = on
     if on then
         runContainerFarmLoop()
@@ -3489,9 +3662,9 @@ toggle("✦", "Auto Farm Loop", function(on)
     end
 end, "AutoContainerFarm")
 dropdown("Auctions", DiscoveredContainers,
-function(c) return State.SelectedContainers[c] end,
-function(c, v) State.SelectedContainers[c] = v end)
-toggle("✦", "Auto Accept Offer", function(on)
+    function(c) return State.SelectedContainers[c] end,
+    function(c, v) State.SelectedContainers[c] = v end)
+toggle("💸", "Auto Accept Offer", function(on)
     State.AutoAcceptOffer = on
     if on then
         startAutoAcceptOffers()
@@ -3501,7 +3674,7 @@ toggle("✦", "Auto Accept Offer", function(on)
     end
 end, "AutoAcceptOffer")
 numberInput("  Min Offer %", State.MinOfferPercent, function(v) State.MinOfferPercent = v end)
-toggle("✦", "Current Auction ESP", function(on)
+toggle("👁️", "Current Auction ESP", function(on)
     State.CurrentAuctionESP = on
     if not on then
         removeAuctionBillboard()
@@ -3511,7 +3684,7 @@ toggle("✦", "Current Auction ESP", function(on)
         end
     end
 end, "CurrentAuctionESP")
-toggle("✦", "Auto Collect Lost Items", function(on)
+toggle("🧬", "Auto Collect Lost Items", function(on)
     State.AutoCollectLost = on
     if on then
         startAutoCollectLost()
@@ -3520,11 +3693,157 @@ toggle("✦", "Auto Collect Lost Items", function(on)
         State.status = "Auto Collect Lost OFF"
     end
 end, "AutoCollectLost")
-toggle("✦", "Auto Spawn Vehicle", function(on)
+toggle("🚛", "Auto Spawn Vehicle", function(on)
     State.AutoSpawnVehicle = on
     State.status = on and "[Vehicle] Auto-spawn ON" or "[Vehicle] Auto-spawn OFF"
 end, "AutoSpawnVehicle")
-toggle("✦", "Auto Favorite Items", function(on)
+toggle("🔒", "Auto Favorite Safe", function(on)
+    State.AutoFavoriteSafe = on
+    if on then
+        startAutoFavoriteSafe()
+        State.status = "[Favorite] Auto-favorite Safe ON"
+    else
+        if autoFavoriteSafeThread then pcall(task.cancel, autoFavoriteSafeThread) end
+        State.status = "Auto Favorite Safe OFF"
+    end
+end, "AutoFavoriteSafe")
+dropdown("Auto Favorite Safe Filters", DiscoveredSafes,
+    function(s) return State.SelectedFavoriteSafes[s] end,
+    function(s, v) State.SelectedFavoriteSafes[s] = v end)
+toggle("🔓", "Auto Lockpick Safe", function(on)
+    State.AutoLockpickSafe = on
+    if on then
+        startAutoLockpickSafe()
+        State.status = "[Lockpick] Auto-lockpick ON"
+    else
+        if autoLockpickSafeThread then pcall(task.cancel, autoLockpickSafeThread) end
+        State.status = "Auto Lockpick OFF"
+    end
+end, "AutoLockpickSafe")
+dropdown("Safe Filters", DiscoveredSafes,
+    function(s) return State.SelectedSafes[s] end,
+    function(s, v) State.SelectedSafes[s] = v end)
+
+-- Auctions Page Builder
+currentCol = getScrollForPage(auctionsPage)
+section("AUCTION")
+toggle("🏁", "Auto Start Auction", function(on)
+    State.AutoStartAuction = on
+    if on then startAutoStartAuction(); State.status = "[Auction] Auto-start ON"
+    else
+        if startAuctionThread then pcall(task.cancel, startAuctionThread) end
+        if startAuctionConn then startAuctionConn:Disconnect() end
+        if startAuctionUIConn then startAuctionUIConn:Disconnect() end
+        State.status = "Auto start auction OFF"
+    end
+end, "AutoStartAuction")
+toggle("🏆", "Auto Win Bids", function(on)
+    State.AutoBidWin = on
+    if on then startAutoBid(); State.status = "[Bid] Auto-bid ON"
+    else
+        if bidConn then bidConn:Disconnect() end
+        if auctionOpenConn then auctionOpenConn:Disconnect() end
+        State.status = "Auto bid OFF"
+    end
+end, "AutoBidWin")
+toggle("💲", "Filter by Price", function(on)
+    State.AutoBidFilterPrice = on
+    State.status = on and "[Bid] Price filter ON" or "Bid filter OFF"
+end, "AuctionFilterPrice")
+numberInput("  Min Bid Value ($)", State.AutoBidMinValue, function(v) State.AutoBidMinValue = v end)
+
+-- Pawn/Shop Page Builder
+currentCol = getScrollForPage(shopPage)
+section("Shop")
+toggle("💰", "Sell Inventory", function(on)
+    State.SellInventory = on
+    if on then startSellInventory(); State.status = "[Shop] Sell Inventory ON"
+    else
+        if sellInventoryThread then pcall(task.cancel, sellInventoryThread) end
+        State.status = "Sell Inventory OFF"
+    end
+end, "SellInventory")
+local quickSellRateLabel = labelRow("Quick Sell Rate", "+0%")
+toggle("📊", "Dynamic Pawn Sell", function(on)
+    State.DynamicPawnSell = on
+end, "DynamicPawnSell")
+numberInput("  Min Pawn Rate (%)", 5, function(val)
+    State.MinPawnPercent = val
+end, "MinPawnPercent")
+toggle("🔍", "Filter Pawn Sell Price", function(on)
+    State.PawnSellFilterPrice = on
+end, "PawnSellFilterPrice")
+numberInput("  Max Sell Value ($)", 100, function(val)
+    State.PawnSellMaxPrice = val
+end, "PawnSellMaxPrice")
+toggle("🎓", "Auto Grade Highest Value Item", function(on)
+    State.AutoGradeHighest = on
+    if on then startAutoGrade(); State.status = "[Grade] Auto-grade ON"
+    else
+        if autoGradeThread then pcall(task.cancel, autoGradeThread) end
+        State.status = "Auto-grade OFF"
+    end
+end, "AutoGradeHighest")
+toggle("🧼", "Auto Clean Highest Value Item", function(on)
+    State.AutoCleanHighest = on
+    if on then startAutoClean(); State.status = "[Clean] Auto-clean ON"
+    else
+        if autoCleanThread then pcall(task.cancel, autoCleanThread) end
+        State.status = "Auto-clean OFF"
+    end
+end, "AutoCleanHighest")
+toggle("🔑", "Auto Locksmith", function(on)
+    State.AutoLocksmith = on
+    if on then startAutoLocksmith(); State.status = "[Locksmith] Auto-locksmith ON"
+    else
+        if autoLocksmithThread then pcall(task.cancel, autoLocksmithThread) end
+        State.status = "Auto-locksmith OFF"
+    end
+end, "AutoLocksmith")
+toggle("⚡", "Auto Buy Energy Drink", function(on)
+    State.AutoBuyEnergyDrink = on
+    if on then startAutoBuyEnergyDrink(); State.status = "[Shop] Auto-buy Energy Drink ON"
+    else
+        if autoBuyEnergyDrinkThread then pcall(task.cancel, autoBuyEnergyDrinkThread) end
+        State.status = "Auto-buy Energy Drink OFF"
+    end
+end, "AutoBuyEnergyDrink")
+dropdown("Energy Drinks", DiscoveredEnergyDrinks,
+    function(it) return State.SelectedEnergyDrinks[it] == true end,
+    function(it, val) State.SelectedEnergyDrinks[it] = val end,
+    "SelectedEnergyDrinks")
+
+-- Filters Page Builder
+currentCol = getScrollForPage(filtersPage)
+section("Auto Pick-Up Filters")
+toggle("💲", "Filter by Price", function(on)
+    State.FilterPrice = on
+    State.status = on and "[Filter] Price filter ON" or "Price filter OFF"
+end, "PickupFilterPrice")
+numberInput("  Min Price ($)", State.MinPrice, function(v) State.MinPrice = v end)
+toggle("💎", "Filter by Rarity", function(on)
+    State.FilterRarity = on
+    State.status = on and "[Filter] Rarity filter ON" or "Filter rarity OFF"
+end, "FilterRarity")
+dropdown("Allowed Rarities", { "Junk", "Uncommon", "Rare", "Epic", "Legendary", "Mythical", "Trophy", "Lost" },
+    function(r) return State.RarityAllow[r] end,
+    function(r, v) State.RarityAllow[r] = v end)
+toggle("🔬", "Filter by Mutation", function(on)
+    State.FilterMutation = on
+    State.status = on and "[Filter] Mutation filter ON" or "Filter mutation OFF"
+end, "FilterMutation")
+dropdown("Allowed Mutations", {
+    "(Normal)",
+    "Silver", "Gold", "Chrome", "Diamond", "Gem", "Hologram", "Black", "Void", "Secret", "Rainbow", "Corrupted",
+    "Cobwebbed", "Antique", "Ancient", "Timeless",
+    "Moonlit", "Firefly", "Wet", "Shocked",
+    "Huge", "Tiny", "Exclusive", "Dirty", "Broken", "Pure", "Spotless",
+},
+    function(m) return State.MutationAllow[m] end,
+    function(m, v) State.MutationAllow[m] = v end)
+
+section("Auto Favorite Filters")
+toggle("⭐", "Auto Favorite Items", function(on)
     State.AutoFavorite = on
     if on then
         startAutoFavorite()
@@ -3535,7 +3854,7 @@ toggle("✦", "Auto Favorite Items", function(on)
     end
 end, "AutoFavorite")
 numberInput("  Min Favorite Price ($)", State.AutoFavoritePrice, function(v) State.AutoFavoritePrice = v end)
-toggle("✦", "Auto Favorite Gavel Trophy", function(on)
+toggle("⭐", "Auto Favorite Gavel Trophy", function(on)
     State.AutoGavelFavorite = on
     if on then
         startAutoGavelFavorite()
@@ -3547,9 +3866,9 @@ toggle("✦", "Auto Favorite Gavel Trophy", function(on)
 end, "AutoGavelFavorite")
 numberInput("  Min Gavel Trophy %", State.AutoGavelMinPercent, function(v) State.AutoGavelMinPercent = v end)
 dropdown("Gavel Trophy Filters", DiscoveredMutations,
-function(m) return State.SelectedGavelMutations[m] end,
-function(m, v) State.SelectedGavelMutations[m] = v end)
-toggle("✦", "Auto Favorite Accessories", function(on)
+    function(m) return State.SelectedGavelMutations[m] end,
+    function(m, v) State.SelectedGavelMutations[m] = v end)
+toggle("⭐", "Auto Favorite Accessories", function(on)
     State.AutoAccessoryFavorite = on
     if on then
         startAutoAccessoryFavorite()
@@ -3561,65 +3880,37 @@ toggle("✦", "Auto Favorite Accessories", function(on)
 end, "AutoAccessoryFavorite")
 numberInput("  Min Accessory %", State.AutoAccessoryMinPercent, function(v) State.AutoAccessoryMinPercent = v end)
 dropdown("Accessory Filters", DiscoveredAccessoryModifiers,
-function(a) return State.SelectedAccessoryModifiers[a] end,
-function(a, v) State.SelectedAccessoryModifiers[a] = v end)
-toggle("✦", "Auto Favorite Safe", function(on)
-    State.AutoFavoriteSafe = on
-    if on then
-        startAutoFavoriteSafe()
-        State.status = "[Favorite] Auto-favorite Safe ON"
-    else
-        if autoFavoriteSafeThread then pcall(task.cancel, autoFavoriteSafeThread) end
-        State.status = "Auto Favorite Safe OFF"
-    end
-end, "AutoFavoriteSafe")
-dropdown("Auto Favorite Safe Filters", DiscoveredSafes,
-function(s) return State.SelectedFavoriteSafes[s] end,
-function(s, v) State.SelectedFavoriteSafes[s] = v end)
-toggle("✦", "Auto Lockpick Safe", function(on)
-    State.AutoLockpickSafe = on
-    if on then
-        startAutoLockpickSafe()
-        State.status = "[Lockpick] Auto-lockpick ON"
-    else
-        if autoLockpickSafeThread then pcall(task.cancel, autoLockpickSafeThread) end
-        State.status = "Auto Lockpick OFF"
-    end
-end, "AutoLockpickSafe")
-dropdown("Safe Filters", DiscoveredSafes,
-function(s) return State.SelectedSafes[s] end,
-function(s, v) State.SelectedSafes[s] = v end)
+    function(a) return State.SelectedAccessoryModifiers[a] end,
+    function(a, v) State.SelectedAccessoryModifiers[a] = v end)
 
+-- Settings Page Builder
+currentCol = getScrollForPage(settingsPage)
+section("PLAYER")
+toggle("⚡", "Speed Hack", function(on)
+    State.SpeedHack = on; applySpeed()
+    State.status = on and "[Player] Speed ON" or "Speed OFF"
+end, "SpeedHack")
+toggle("🛡️", "Anti-AFK", function(on)
+    State.AntiAFK = on
+    State.status = on and "[Player] Anti-AFK ON" or "Anti-AFK OFF"
+end, "AntiAFK")
 
-
-section("AUCTION")
-toggle("✦","Auto Start Auction",function(on)
-    State.AutoStartAuction = on
-    if on then startAutoStartAuction(); State.status = "[Auction] Auto-start ON"
-    else
-        if startAuctionThread then pcall(task.cancel, startAuctionThread) end
-        if startAuctionConn then startAuctionConn:Disconnect() end
-        if startAuctionUIConn then startAuctionUIConn:Disconnect() end
-        State.status = "Auto start auction OFF"
+section("SETTINGS")
+numberInput("Max Bid Amount ($)", State.MaxBid, function(v) State.MaxBid = v end, "MaxBid")
+slider("Walk Speed", 16, 120, 50, function(v)
+    State.WalkSpeed = v
+    if State.SpeedHack then
+        local h = character and character:FindFirstChildOfClass("Humanoid")
+        if h then h.WalkSpeed = v end
     end
-end, "AutoStartAuction")
-toggle("✦","Auto Win Bids",function(on)
-    State.AutoBidWin = on
-    if on then startAutoBid(); State.status = "[Bid] Auto-bid ON"
-    else
-        if bidConn then bidConn:Disconnect() end
-        if auctionOpenConn then auctionOpenConn:Disconnect() end
-        State.status = "Auto bid OFF"
-    end
-end, "AutoBidWin")
-toggle("✦","Filter by Price",function(on)
-    State.AutoBidFilterPrice = on
-    State.status = on and "[Bid] Price filter ON" or "Bid filter OFF"
-end, "AuctionFilterPrice")
-numberInput("  Min Bid Value ($)", State.AutoBidMinValue, function(v) State.AutoBidMinValue = v end)
-
-section("Auto")
-toggle("✦","Auto Pickup Items",function(on)
+end, "WalkSpeed")
+slider("Sell Delay (ms)", 100, 2000, 250, function(v) State.SellDelay = v / 1000 end, "SellDelay")
+slider("Bid Delay (ms)", 50, 800, 150, function(v) State.BidDelay = v / 1000 end, "BidDelay")
+toggle("📦", "Heaviest First", function(on)
+    State.PrioritizeHeavy = on
+    State.status = on and "[Shelf] Heaviest first" or "Default order"
+end, "PrioritizeHeavy")
+toggle("📦", "Auto Pickup Items", function(on)
     State.AutoPickup = on
     if on then startAutoPickup(); State.status = "[Pickup] Auto-pickup ON"
     else
@@ -3628,12 +3919,7 @@ toggle("✦","Auto Pickup Items",function(on)
         State.status = "Auto pickup OFF"
     end
 end, "AutoPickup")
-toggle("✦","Heaviest First",function(on)
-    State.PrioritizeHeavy = on
-    State.status = on and "[Shelf] Heaviest first" or "Default order"
-end, "PrioritizeHeavy")
-
-toggle("✦","Auto Unload Car",function(on)
+toggle("📦", "Auto Unload Car", function(on)
     State.AutoUnload = on
     if on then startAutoUnload(); State.status = "[Unload] Auto-unload ON"
     else
@@ -3641,8 +3927,7 @@ toggle("✦","Auto Unload Car",function(on)
         State.status = "Auto unload OFF"
     end
 end, "AutoUnload")
-
-toggle("✦","Auto Add to Shelf",function(on)
+toggle("📦", "Auto Add to Shelf", function(on)
     State.AutoShelf = on
     if on then startAutoShelf(); State.status = "[Shelf] Auto-shelf ON"
     else
@@ -3651,142 +3936,13 @@ toggle("✦","Auto Add to Shelf",function(on)
         State.status = "Auto shelf OFF"
     end
 end, "AutoShelf")
-toggle("✦","Shelf Price Filter",function(on)
+toggle("📦", "Shelf Price Filter", function(on)
     State.ShelfFilterPrice = on
     State.status = on and "[Shelf] Cheap filter ON" or "Shelf filter OFF"
 end, "ShelfFilterPrice")
 numberInput("  Max Shelf Price ($)", State.ShelfMaxPrice, function(v) State.ShelfMaxPrice = v end)
 
-section("Shop")
-toggle("✦","Sell Inventory",function(on)
-    State.SellInventory = on
-    if on then startSellInventory(); State.status = "[Shop] Sell Inventory ON"
-    else
-        if sellInventoryThread then pcall(task.cancel, sellInventoryThread) end
-        State.status = "Sell Inventory OFF"
-    end
-end, "SellInventory")
-local quickSellRateLabel = labelRow("Quick Sell Rate", "+0%")
-
-toggle("✦","Dynamic Pawn Sell",function(on)
-    State.DynamicPawnSell = on
-end, "DynamicPawnSell")
-
-numberInput("  Min Pawn Rate (%)", 5, function(val)
-    State.MinPawnPercent = val
-end, "MinPawnPercent")
-
-toggle("✦","Filter Pawn Sell Price",function(on)
-    State.PawnSellFilterPrice = on
-end, "PawnSellFilterPrice")
-
-numberInput("  Max Sell Value ($)", 100, function(val)
-    State.PawnSellMaxPrice = val
-end, "PawnSellMaxPrice")
-toggle("✦","Auto Grade Highest Value Item",function(on)
-    State.AutoGradeHighest = on
-    if on then startAutoGrade(); State.status = "[Grade] Auto-grade ON"
-    else
-        if autoGradeThread then pcall(task.cancel, autoGradeThread) end
-        State.status = "Auto-grade OFF"
-    end
-end, "AutoGradeHighest")
-toggle("✦","Auto Clean Highest Value Item",function(on)
-    State.AutoCleanHighest = on
-    if on then startAutoClean(); State.status = "[Clean] Auto-clean ON"
-    else
-        if autoCleanThread then pcall(task.cancel, autoCleanThread) end
-        State.status = "Auto-clean OFF"
-    end
-end, "AutoCleanHighest")
-toggle("✦","Auto Locksmith",function(on)
-    State.AutoLocksmith = on
-    if on then startAutoLocksmith(); State.status = "[Locksmith] Auto-locksmith ON"
-    else
-        if autoLocksmithThread then pcall(task.cancel, autoLocksmithThread) end
-        State.status = "Auto-locksmith OFF"
-    end
-end, "AutoLocksmith")
-
-toggle("✦","Auto Buy Energy Drink",function(on)
-    State.AutoBuyEnergyDrink = on
-    if on then startAutoBuyEnergyDrink(); State.status = "[Shop] Auto-buy Energy Drink ON"
-    else
-        if autoBuyEnergyDrinkThread then pcall(task.cancel, autoBuyEnergyDrinkThread) end
-        State.status = "Auto-buy Energy Drink OFF"
-    end
-end, "AutoBuyEnergyDrink")
-
-dropdown("Energy Drinks", DiscoveredEnergyDrinks,
-    function(it) return State.SelectedEnergyDrinks[it] == true end,
-    function(it,val) State.SelectedEnergyDrinks[it] = val end,
-    "SelectedEnergyDrinks")
-
--- ─── PICKUP FILTERS ─────────────────────────────────────────────────
--- Each filter only matters when its toggle is ON. An item is picked only if it
--- passes EVERY enabled filter. With all filters off, everything is picked (default).
-section("Auto Pick-Up Filters")
-
--- Price: pick only if value >= Min Price (no upper limit)
-toggle("✦","Filter by Price",function(on)
-    State.FilterPrice = on
-    State.status = on and "[Filter] Price filter ON" or "Price filter OFF"
-end, "PickupFilterPrice")
-numberInput("  Min Price ($)", State.MinPrice, function(v) State.MinPrice = v end)
-
--- Rarity: pick only checked rarities
-toggle("✦","Filter by Rarity",function(on)
-    State.FilterRarity = on
-    State.status = on and "[Filter] Rarity filter ON" or "Filter rarity OFF"
-end, "FilterRarity")
-dropdown("Allowed Rarities", { "Junk","Uncommon","Rare","Epic","Legendary","Mythical","Trophy","Lost" },
-    function(r) return State.RarityAllow[r] end,
-    function(r, v) State.RarityAllow[r] = v end)
-
--- Mutation: pick only items that have one of the checked mutations
--- ("(Normal)" matches items with no mutation at all)
-toggle("✦","Filter by Mutation",function(on)
-    State.FilterMutation = on
-    State.status = on and "[Filter] Mutation filter ON" or "Filter mutation OFF"
-end, "FilterMutation")
-dropdown("Allowed Mutations", {
-    "(Normal)",
-    "Silver","Gold","Chrome","Diamond","Gem","Hologram","Black","Void","Secret","Rainbow","Corrupted",
-    "Cobwebbed","Antique","Ancient","Timeless",
-    "Moonlit","Firefly","Wet","Shocked",
-    "Huge","Tiny","Exclusive","Dirty","Broken","Pure","Spotless",
-},
-    function(m) return State.MutationAllow[m] end,
-    function(m, v) State.MutationAllow[m] = v end)
-
-section("PLAYER")
-toggle("✦","Speed Hack",function(on)
-    State.SpeedHack = on; applySpeed()
-    State.status = on and "[Player] Speed ON" or "Speed OFF"
-end, "SpeedHack")
-toggle("✦","Anti-AFK",function(on)
-    State.AntiAFK = on
-    State.status = on and "[Player] Anti-AFK ON" or "Anti-AFK OFF"
-end, "AntiAFK")
-
-section("SETTINGS")
-numberInput("Max Bid Amount ($)", State.MaxBid, function(v) State.MaxBid = v end, "MaxBid")
-slider("Walk Speed",16,120,50,function(v)
-    State.WalkSpeed = v
-    if State.SpeedHack then
-        local h = character and character:FindFirstChildOfClass("Humanoid")
-        if h then h.WalkSpeed = v end
-    end
-end,"WalkSpeed")
-slider("Sell Delay (ms)",100,2000,250,function(v) State.SellDelay = v/1000 end,"SellDelay")
-slider("Bid Delay (ms)",50,800,150,function(v) State.BidDelay = v/1000 end,"BidDelay")
-
--- ─── PROFILES (Save Settings) ───────────────────────────────────────
--- Save the current ON/OFF toggles + all values to a named profile that
--- persists on disk via the executor's file storage. Load applies a saved
--- profile back onto every control (visual + state) in one click.
 section("PROFILES")
-
 local PROFILE_DIR = "SH_AutoFarm_Profiles"
 local hasFiles = (type(writefile) == "function" and type(readfile) == "function")
 
@@ -3847,88 +4003,84 @@ local function deleteProfile(name)
     end)
 end
 
--- Forward-declared so the Save button's click closure can call it.
 local rebuildList
-
--- Profile manager (Create -> dropdown -> Load / Overwrite / Delete) — template style.
--- Wrapped in a do-block so its many UI locals don't count toward Luau's 200-per-fn cap.
 do
     local selectedProfile = nil
     local inputRow = Instance.new("Frame", currentCol)
-    inputRow.Size = UDim2.new(1,0,0,32); inputRow.BackgroundTransparency = 1
+    inputRow.Size = UDim2.new(1, 0, 0, 32); inputRow.BackgroundTransparency = 1
     inputRow.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     local nameBox = Instance.new("TextBox", inputRow)
-    nameBox.Size = UDim2.new(1,-74,1,0); nameBox.BackgroundColor3 = Color3.fromRGB(45,45,52)
-    nameBox.Text = ""; nameBox.PlaceholderText = "new profile name..."; nameBox.PlaceholderColor3 = Color3.fromRGB(150,150,160)
-    nameBox.TextColor3 = Color3.fromRGB(235,235,240); nameBox.TextSize = 12; nameBox.Font = Enum.Font.Gotham
+    nameBox.Size = UDim2.new(1, -74, 1, 0); nameBox.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+    nameBox.Text = ""; nameBox.PlaceholderText = "new profile name..."; nameBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 160)
+    nameBox.TextColor3 = Color3.fromRGB(235, 235, 240); nameBox.TextSize = 12; nameBox.Font = Enum.Font.Gotham
     nameBox.ClearTextOnFocus = false; nameBox.BorderSizePixel = 0
-    Instance.new("UICorner",nameBox).CornerRadius = UDim.new(0,6)
-    local nbp = Instance.new("UIPadding",nameBox); nbp.PaddingLeft = UDim.new(0,8); nbp.PaddingRight = UDim.new(0,8)
+    Instance.new("UICorner", nameBox).CornerRadius = UDim.new(0, 6)
+    local nbp = Instance.new("UIPadding", nameBox); nbp.PaddingLeft = UDim.new(0, 8); nbp.PaddingRight = UDim.new(0, 8)
     local createBtn = Instance.new("TextButton", inputRow)
-    createBtn.Size = UDim2.new(0,66,1,0); createBtn.Position = UDim2.new(1,-66,0,0)
-    createBtn.BackgroundColor3 = Color3.fromRGB(220,40,50); createBtn.Font = Enum.Font.GothamBold
-    createBtn.Text = "+ Create"; createBtn.TextColor3 = Color3.new(1,1,1); createBtn.TextSize = 12; createBtn.BorderSizePixel = 0
-    Instance.new("UICorner",createBtn).CornerRadius = UDim.new(0,6)
+    createBtn.Size = UDim2.new(0, 66, 1, 0); createBtn.Position = UDim2.new(1, -66, 0, 0)
+    createBtn.BackgroundColor3 = Color3.fromRGB(235, 70, 50); createBtn.Font = Enum.Font.GothamBold
+    createBtn.Text = "+ Create"; createBtn.TextColor3 = Color3.new(1, 1, 1); createBtn.TextSize = 12; createBtn.BorderSizePixel = 0
+    Instance.new("UICorner", createBtn).CornerRadius = UDim.new(0, 6)
 
     local ddButton = Instance.new("TextButton", currentCol)
-    ddButton.Size = UDim2.new(1,0,0,28); ddButton.BackgroundColor3 = Color3.fromRGB(45,45,52); ddButton.AutoButtonColor = false
+    ddButton.Size = UDim2.new(1, 0, 0, 28); ddButton.BackgroundColor3 = Color3.fromRGB(24, 24, 28); ddButton.AutoButtonColor = false
     ddButton.Text = ""; ddButton.BorderSizePixel = 0; ddButton.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",ddButton).CornerRadius = UDim.new(0,6)
-    local dds = Instance.new("UIStroke",ddButton); dds.Color = Color3.fromRGB(200,30,40); dds.Transparency = 0.5
-    local ddLabel = mkLabel(ddButton,"Select profile...",UDim2.new(1,-32,1,0),UDim2.new(0,10,0,0),12,Enum.Font.GothamMedium,Color3.fromRGB(150,150,160),1,Enum.TextXAlignment.Left)
+    Instance.new("UICorner", ddButton).CornerRadius = UDim.new(0, 6)
+    local dds = Instance.new("UIStroke", ddButton); dds.Color = Color3.fromRGB(235, 70, 50); dds.Transparency = 0.5
+    local ddLabel = mkLabel(ddButton, "Select profile...", UDim2.new(1, -32, 1, 0), UDim2.new(0, 10, 0, 0), 12, Enum.Font.GothamMedium, Color3.fromRGB(150, 150, 160), 1, Enum.TextXAlignment.Left)
     ddLabel.TextTruncate = Enum.TextTruncate.AtEnd
-    local ddArrow = mkLabel(ddButton,"v",UDim2.new(0,26,1,0),UDim2.new(1,-28,0,0),12,Enum.Font.GothamBold,Color3.fromRGB(255,70,80),1,Enum.TextXAlignment.Center)
+    local ddArrow = mkLabel(ddButton, "v", UDim2.new(0, 26, 1, 0), UDim2.new(1, -28, 0, 0), 12, Enum.Font.GothamBold, Color3.fromRGB(235, 70, 50), 1, Enum.TextXAlignment.Center)
 
     local ddList = Instance.new("Frame", currentCol)
-    ddList.Size = UDim2.new(1,0,0,0); ddList.AutomaticSize = Enum.AutomaticSize.Y
-    ddList.BackgroundColor3 = Color3.fromRGB(28,28,32); ddList.BorderSizePixel = 0; ddList.Visible = false
+    ddList.Size = UDim2.new(1, 0, 0, 0); ddList.AutomaticSize = Enum.AutomaticSize.Y
+    ddList.BackgroundColor3 = Color3.fromRGB(28, 28, 32); ddList.BorderSizePixel = 0; ddList.Visible = false
     ddList.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    Instance.new("UICorner",ddList).CornerRadius = UDim.new(0,6)
-    local ddll = Instance.new("UIListLayout",ddList); ddll.Padding = UDim.new(0,2); ddll.SortOrder = Enum.SortOrder.LayoutOrder
-    local ddp = Instance.new("UIPadding",ddList); ddp.PaddingTop = UDim.new(0,3); ddp.PaddingBottom = UDim.new(0,3); ddp.PaddingLeft = UDim.new(0,3); ddp.PaddingRight = UDim.new(0,3)
+    Instance.new("UICorner", ddList).CornerRadius = UDim.new(0, 6)
+    local ddll = Instance.new("UIListLayout", ddList); ddll.Padding = UDim.new(0, 2); ddll.SortOrder = Enum.SortOrder.LayoutOrder
+    local ddp = Instance.new("UIPadding", ddList); ddp.PaddingTop = UDim.new(0, 3); ddp.PaddingBottom = UDim.new(0, 3); ddp.PaddingLeft = UDim.new(0, 3); ddp.PaddingRight = UDim.new(0, 3)
 
     local actionRow = Instance.new("Frame", currentCol)
-    actionRow.Size = UDim2.new(1,0,0,28); actionRow.BackgroundTransparency = 1; actionRow.Visible = false
+    actionRow.Size = UDim2.new(1, 0, 0, 28); actionRow.BackgroundTransparency = 1; actionRow.Visible = false
     actionRow.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
-    local arl = Instance.new("UIListLayout",actionRow); arl.FillDirection = Enum.FillDirection.Horizontal; arl.Padding = UDim.new(0,6); arl.SortOrder = Enum.SortOrder.LayoutOrder
-    local function mkAction(txt,color,ord)
-        local b = Instance.new("TextButton",actionRow)
-        b.Size = UDim2.new(1/3,-4,1,0); b.BackgroundColor3 = color; b.Font = Enum.Font.GothamBold
-        b.Text = txt; b.TextColor3 = Color3.new(1,1,1); b.TextSize = 11; b.BorderSizePixel = 0; b.LayoutOrder = ord
-        Instance.new("UICorner",b).CornerRadius = UDim.new(0,6)
+    local arl = Instance.new("UIListLayout", actionRow); arl.FillDirection = Enum.FillDirection.Horizontal; arl.Padding = UDim.new(0, 6); arl.SortOrder = Enum.SortOrder.LayoutOrder
+    local function mkAction(txt, color, ord)
+        local b = Instance.new("TextButton", actionRow)
+        b.Size = UDim2.new(1/3, -4, 1, 0); b.BackgroundColor3 = color; b.Font = Enum.Font.GothamBold
+        b.Text = txt; b.TextColor3 = Color3.new(1, 1, 1); b.TextSize = 11; b.BorderSizePixel = 0; b.LayoutOrder = ord
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
         return b
     end
-    local loadAct = mkAction("Load", Color3.fromRGB(220,40,50), 1)
-    local owAct   = mkAction("Overwrite", Color3.fromRGB(150,90,30), 2)
-    local delAct  = mkAction("Delete", Color3.fromRGB(90,30,34), 3)
+    local loadAct = mkAction("Load", Color3.fromRGB(235, 70, 50), 1)
+    local owAct   = mkAction("Overwrite", Color3.fromRGB(150, 90, 30), 2)
+    local delAct  = mkAction("Delete", Color3.fromRGB(90, 30, 34), 3)
 
     local function setSelected(name)
         selectedProfile = name
         ddLabel.Text = name or "Select profile..."
-        ddLabel.TextColor3 = name and Color3.fromRGB(235,235,240) or Color3.fromRGB(150,150,160)
+        ddLabel.TextColor3 = name and Color3.fromRGB(235, 235, 240) or Color3.fromRGB(150, 150, 160)
         actionRow.Visible = name ~= nil
     end
     local function closeDropdown() ddList.Visible = false; ddArrow.Text = "v" end
     rebuildList = function()
-        for _,ch in ipairs(ddList:GetChildren()) do
+        for _, ch in ipairs(ddList:GetChildren()) do
             if ch:IsA("TextButton") or ch:IsA("TextLabel") then ch:Destroy() end
         end
         local names = listProfiles()
         if #names == 0 then
-            mkLabel(ddList,"(no profiles yet)",UDim2.new(1,0,0,22),UDim2.new(0,0,0,0),11,nil,Color3.fromRGB(150,150,160),1,Enum.TextXAlignment.Center)
+            mkLabel(ddList, "(no profiles yet)", UDim2.new(1, 0, 0, 22), UDim2.new(0, 0, 0, 0), 11, nil, Color3.fromRGB(150, 150, 160), 1, Enum.TextXAlignment.Center)
         else
-            for i,nm in ipairs(names) do
-                local opt = Instance.new("TextButton",ddList)
-                opt.Size = UDim2.new(1,0,0,24); opt.BackgroundColor3 = Color3.fromRGB(45,45,52); opt.Font = Enum.Font.Gotham
-                opt.Text = "  "..nm; opt.TextXAlignment = Enum.TextXAlignment.Left; opt.TextColor3 = Color3.fromRGB(235,235,240)
+            for i, nm in ipairs(names) do
+                local opt = Instance.new("TextButton", ddList)
+                opt.Size = UDim2.new(1, 0, 0, 24); opt.BackgroundColor3 = Color3.fromRGB(45, 45, 52); opt.Font = Enum.Font.Gotham
+                opt.Text = "  " .. nm; opt.TextXAlignment = Enum.TextXAlignment.Left; opt.TextColor3 = Color3.fromRGB(235, 235, 240)
                 opt.TextSize = 12; opt.BorderSizePixel = 0; opt.LayoutOrder = i
-                Instance.new("UICorner",opt).CornerRadius = UDim.new(0,5)
+                Instance.new("UICorner", opt).CornerRadius = UDim.new(0, 5)
                 opt.MouseButton1Click:Connect(function() setSelected(nm); closeDropdown() end)
             end
         end
         if selectedProfile then
             local found = false
-            for _,nm in ipairs(names) do if nm == selectedProfile then found = true break end end
+            for _, nm in ipairs(names) do if nm == selectedProfile then found = true break end end
             if not found then setSelected(nil) end
         end
     end
@@ -3939,51 +4091,50 @@ do
     end)
     createBtn.MouseButton1Click:Connect(function()
         local nm = sanitize(nameBox.Text)
-        if nm == "" then State.status = "[!] Enter a profile name first"; return end
-        if saveProfile(nm) then nameBox.Text = ""; rebuildList(); setSelected(nm); State.status = "[Profiles] Saved: "..nm
-        else State.status = "[!] Save failed (executor file access?)" end
+        if nm == "" then State.status = "⚠️ Enter a profile name first"; return end
+        if saveProfile(nm) then nameBox.Text = ""; rebuildList(); setSelected(nm); State.status = "💾 Saved profile: " .. nm
+        else State.status = "⚠️ Save failed (executor file access?)" end
     end)
     loadAct.MouseButton1Click:Connect(function()
-        if selectedProfile and applyProfile(selectedProfile) then State.status = "[Profiles] Loaded: "..selectedProfile end
+        if selectedProfile and applyProfile(selectedProfile) then State.status = "📂 Loaded profile: " .. selectedProfile end
     end)
     owAct.MouseButton1Click:Connect(function()
-        if selectedProfile and saveProfile(selectedProfile) then State.status = "[Profiles] Overwrote: "..selectedProfile end
+        if selectedProfile and saveProfile(selectedProfile) then State.status = "💾 Overwrote profile: " .. selectedProfile end
     end)
     delAct.MouseButton1Click:Connect(function()
-        if selectedProfile then local n = selectedProfile; deleteProfile(n); setSelected(nil); rebuildList(); State.status = "[Profiles] Deleted: "..n end
+        if selectedProfile then local n = selectedProfile; deleteProfile(n); setSelected(nil); rebuildList(); State.status = "🗑️ Deleted profile: " .. n end
     end)
     rebuildList()
 end
 
--- Footer
-local ft = Instance.new("Frame",currentCol)
-ft.Size = UDim2.new(1,0,0,22)
-ft.BackgroundColor3 = Color3.fromRGB(10,10,10)
-ft.BorderSizePixel = 0; ft.LayoutOrder = 999
-Instance.new("UICorner",ft).CornerRadius = UDim.new(0,6)
-mkLabel(ft,"Storage Hunters AutoFarm v3  |  MCP Crafted",UDim2.new(1,0,1,0),UDim2.new(0,0,0,0),9,nil,Color3.fromRGB(100,100,100),1,Enum.TextXAlignment.Center)
+-- Initialize default active tab
+switchTab("Dashboard")
 
-
--- Drag (supports both mouse and touch)
-local isDrag,dStart,dPos=false,nil,nil
-HD.InputBegan:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        isDrag=true;dStart=i.Position;dPos=MF.Position
+-- Draggable Main Panel Support
+local isDrag, dStart, dPos = false, nil, nil
+SB_header.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        isDrag = true; dStart = i.Position; dPos = MF.Position
+    end
+end)
+Sidebar.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        isDrag = true; dStart = i.Position; dPos = MF.Position
     end
 end)
 track(UserInputService.InputChanged:Connect(function(i)
-    if isDrag and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
-        local d=i.Position-dStart
-        MF.Position=UDim2.new(dPos.X.Scale,dPos.X.Offset+d.X,dPos.Y.Scale,dPos.Y.Offset+d.Y)
+    if isDrag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - dStart
+        MF.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset + d.X, dPos.Y.Scale, dPos.Y.Offset + d.Y)
     end
 end))
 track(UserInputService.InputEnded:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        if isDrag then isDrag=false; applyResponsive() end  -- snap back on-screen
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        if isDrag then isDrag = false; applyResponsive() end
     end
 end))
 
--- ─── FLOATING LOGO BUTTON (drag to move, tap to show/hide the panel) ───
+-- Floating Toggle Button (Initials HH)
 local function resolveLogo()
     local ok, id = pcall(function()
         if getcustomasset and isfile and isfile("HudasHub_Logo.png") then
@@ -3993,6 +4144,7 @@ local function resolveLogo()
     if ok and type(id) == "string" then return id end
     return nil
 end
+
 fab = Instance.new("TextButton")
 fab.Name = "Toggle"
 fab.Size = UDim2.fromOffset(52, 52)
@@ -4006,6 +4158,7 @@ fab.ZIndex = 50
 fab.Parent = SG
 Instance.new("UICorner", fab).CornerRadius = UDim.new(1, 0)
 local fring = Instance.new("UIStroke", fab); fring.Color = Color3.fromRGB(235, 70, 50); fring.Thickness = 2.5
+
 do
     local logoId = resolveLogo()
     if logoId then
@@ -4016,9 +4169,10 @@ do
     else
         local t = Instance.new("TextLabel", fab)
         t.Size = UDim2.fromScale(1, 1); t.BackgroundTransparency = 1; t.Font = Enum.Font.GothamBlack
-        t.Text = "HH"; t.TextColor3 = Color3.fromRGB(255, 70, 80); t.TextSize = 20; t.ZIndex = 51
+        t.Text = "HH"; t.TextColor3 = Color3.fromRGB(235, 70, 80); t.TextSize = 20; t.ZIndex = 51
     end
 end
+
 do
     local fDrag, fMoved, fStart, fPos
     fab.InputBegan:Connect(function(i)
@@ -4041,7 +4195,6 @@ do
     end))
 end
 
--- Heartbeat update
 local function cleanStatus(str)
     if type(str) ~= "string" then return tostring(str) end
     local clean = str
@@ -4078,25 +4231,34 @@ local function cleanStatus(str)
 end
 
 track(RunService.Heartbeat:Connect(function(dt)
-    SLbl.Text = "Status: " .. cleanStatus(State.status)
-    EV.Text  = "$" .. formatEarnings(State.earnings)
-    ISV.Text = tostring(State.itemsSold)
-    BWV.Text = tostring(State.bidsWon)
-
-    local anyOn = State.AutoContainerFarm or State.AutoCollectLost or State.AutoFavorite or State.AutoGavelFavorite or State.AutoAccessoryFavorite or State.AutoFavoriteSafe or State.AutoLockpickSafe or State.AutoBidWin or State.AutoPickup or State.AutoUnload or State.AutoShelf or State.AutoCleanHighest or State.AutoGradeHighest or State.AutoLocksmith or State.SellInventory
-    local p = math.abs(math.sin(tick()*2.5))
-    SDot.BackgroundColor3 = anyOn
-        and Color3.fromRGB(math.floor(120+135*p),20,20)
-        or Color3.fromRGB(40,40,40)
-
-
+    local rawStatus = cleanStatus(State.status)
+    card_status.Text = rawStatus
+    card_earnings.Text = "$" .. formatEarnings(State.earnings)
+    card_sold.Text = tostring(State.itemsSold)
+    card_won.Text = tostring(State.bidsWon)
+    
+    local targetName = "None"
+    if State.AutoContainerFarm then
+        local current = State.currentGarage
+        if current then
+            targetName = current.Name
+        else
+            targetName = "Searching..."
+        end
+    end
+    card_target.Text = targetName
+    
+    local elapsed = math.floor(os.clock() - scriptStart)
+    local hours = math.floor(elapsed / 3600)
+    local mins = math.floor((elapsed % 3600) / 60)
+    local secs = elapsed % 60
+    card_runtime.Text = string.format("%02d:%02d:%02d", hours, mins, secs)
 end))
 
 -- Dynamic Plot Sales (NPC) Tracker
 local lastSales = player:GetAttribute("LifetimeNPCSales") or 0
 local lastCash = player:GetAttribute("Cash") or 0
 local isNPCSelling = false
-local scriptStart = os.clock()
 
 track(player:GetAttributeChangedSignal("LifetimeNPCSales"):Connect(function()
     local newSales = player:GetAttribute("LifetimeNPCSales") or 0
@@ -4218,8 +4380,8 @@ startCurrentAuctionESPManager()
 startAutoAcceptOffers()
 
 MF.Size = UDim2.new(0,0,0,0)
-MF.Position = UDim2.new(1, -18, 0.5, 0)
-TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,DESIGN_W,0,responsiveHeight())}):Play()
+MF.Position = UDim2.new(0.5, 0, 0.5, 0)
+TweenService:Create(MF,TweenInfo.new(0.4,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.fromOffset(DESIGN_W, DESIGN_H)}):Play()
 
 local plotName = State.myPlot and State.myPlot.Name or "Searching..."
 State.status = "[System] Ready! Plot: " .. plotName

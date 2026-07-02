@@ -116,9 +116,16 @@ local function discoverAllGarages()
     local defaultNames = {
         "Barn Garage",
         "Camo Shop Front",
+        "Cargo Container",
+        "Cargo Ship Container",
+        "Large Cargo Container",
         "Large Container Garage",
+        "Premium Cargo Container",
+        "Premium Shipyard Garage",
         "Scrap Garage 2",
         "Scrap Garage 3",
+        "Shipyard Container",
+        "Shipyard Garage",
         "Shop Front",
         "Small Container Garage",
         "Stable Garage",
@@ -2947,13 +2954,13 @@ local function applyResponsive()
         local fp = fab.AbsolutePosition
         fab.Position = UDim2.fromOffset(
             math.clamp(fp.X, 0, math.max(0, vp.X - fs)),
-            math.clamp(fp.Y, 0, math.max(0, vp.Y - fs)))
+            math.clamp(fp.Y, 0, math.max(0, vp.Y - fs)) + fs * 0.5)
     end
 end
 
 track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyResponsive))
 
-MF.BackgroundColor3 = Color3.fromRGB(11, 11, 13)
+MF.BackgroundColor3 = Color3.fromRGB(7, 7, 8)
 MF.BorderSizePixel = 0
 MF.AnchorPoint = Vector2.new(0.5, 0.5)
 MF.Position = UDim2.new(0.5, 0, 0.5, 0)
@@ -2969,7 +2976,7 @@ stroke.Transparency = 0.6
 local Sidebar = Instance.new("Frame", MF)
 Sidebar.Name = "Sidebar"
 Sidebar.Size = UDim2.new(0, 210, 1, 0)
-Sidebar.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+Sidebar.BackgroundColor3 = Color3.fromRGB(10, 10, 11)
 Sidebar.BorderSizePixel = 0
 Instance.new("UICorner", Sidebar).CornerRadius = UDim.new(0, 16)
 
@@ -2977,7 +2984,7 @@ Instance.new("UICorner", Sidebar).CornerRadius = UDim.new(0, 16)
 local SB_clipper = Instance.new("Frame", Sidebar)
 SB_clipper.Size = UDim2.new(0, 16, 1, 0)
 SB_clipper.Position = UDim2.new(1, -16, 0, 0)
-SB_clipper.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+SB_clipper.BackgroundColor3 = Color3.fromRGB(10, 10, 11)
 SB_clipper.BorderSizePixel = 0
 SB_clipper.ZIndex = 1
 
@@ -2991,7 +2998,7 @@ SB_header.ZIndex = 2
 local SB_logo = Instance.new("Frame", SB_header)
 SB_logo.Size = UDim2.fromOffset(40, 40)
 SB_logo.Position = UDim2.new(0, 16, 0.5, -20)
-SB_logo.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+SB_logo.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
 SB_logo.BorderSizePixel = 0
 SB_logo.ZIndex = 2
 Instance.new("UICorner", SB_logo).CornerRadius = UDim.new(1, 0)
@@ -3091,8 +3098,8 @@ pageSub.TextXAlignment = Enum.TextXAlignment.Left
 local minimizeBtn = Instance.new("TextButton", ContentHeader)
 minimizeBtn.Name = "Minimize"
 minimizeBtn.Size = UDim2.fromOffset(24, 24)
-minimizeBtn.Position = UDim2.new(1, -38, 0, 18)
-minimizeBtn.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+minimizeBtn.Position = UDim2.new(1, -68, 0, 18)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
 minimizeBtn.BorderSizePixel = 0
 minimizeBtn.Font = Enum.Font.GothamBold
 minimizeBtn.Text = "-"
@@ -3100,8 +3107,34 @@ minimizeBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
 minimizeBtn.TextSize = 14
 Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 6)
 local min_stroke = Instance.new("UIStroke", minimizeBtn)
-min_stroke.Color = Color3.fromRGB(45, 45, 52)
+min_stroke.Color = Color3.fromRGB(35, 35, 40)
 min_stroke.Thickness = 1
+minimizeBtn.MouseButton1Click:Connect(function()
+    MF.Visible = false
+end)
+
+local closeBtn = Instance.new("TextButton", ContentHeader)
+closeBtn.Name = "Close"
+closeBtn.Size = UDim2.fromOffset(24, 24)
+closeBtn.Position = UDim2.new(1, -38, 0, 18)
+closeBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+closeBtn.BorderSizePixel = 0
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.Text = "x"
+closeBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
+closeBtn.TextSize = 14
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
+local cls_stroke = Instance.new("UIStroke", closeBtn)
+cls_stroke.Color = Color3.fromRGB(35, 35, 40)
+cls_stroke.Thickness = 1
+closeBtn.MouseButton1Click:Connect(function()
+    if _G.__SH_AF_CLEANUP then
+        pcall(_G.__SH_AF_CLEANUP)
+        _G.__SH_AF_CLEANUP = nil
+    end
+    if SG then pcall(function() SG:Destroy() end) end
+    pcall(removeAuctionBillboard)
+end)
 
 local Pages = Instance.new("Frame", Content)
 Pages.Name = "Pages"
@@ -3143,7 +3176,7 @@ local function switchTab(tabName)
         local indicator = btn:FindFirstChild("Indicator")
         local label = btn:FindFirstChild("Label")
         if indicator then indicator.Visible = isActive end
-        btn.BackgroundColor3 = isActive and Color3.fromRGB(24, 20, 22) or Color3.fromRGB(15, 15, 17)
+        btn.BackgroundColor3 = isActive and Color3.fromRGB(18, 14, 15) or Color3.fromRGB(10, 10, 11)
         if label then
             label.TextColor3 = isActive and Color3.fromRGB(250, 250, 250) or Color3.fromRGB(150, 150, 160)
         end
@@ -3158,7 +3191,7 @@ local function createTabButton(name, display, order)
     local btn = Instance.new("TextButton", tabContainer)
     btn.Name = name
     btn.Size = UDim2.new(0.9, 0, 0, 36)
-    btn.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+    btn.BackgroundColor3 = Color3.fromRGB(10, 10, 11)
     btn.BorderSizePixel = 0
     btn.Text = ""
     btn.LayoutOrder = order
@@ -3220,7 +3253,7 @@ gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
 local function createDashboardCard(title, defaultVal, order)
     local card = Instance.new("Frame", dashboardGrid)
     card.LayoutOrder = order
-    card.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    card.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
     card.BorderSizePixel = 0
     Instance.new("UICorner", card).CornerRadius = UDim.new(0, 10)
     
@@ -3316,7 +3349,7 @@ end
 local function toggle(icon, txt, onFn, key)
     local row = Instance.new("Frame", currentCol)
     row.Size = UDim2.new(1, 0, 0, 38)
-    row.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    row.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
     local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.85; rst.Thickness = 1
@@ -3348,11 +3381,11 @@ local function toggle(icon, txt, onFn, key)
         if on then
             TweenService:Create(track, ti, {BackgroundColor3 = Color3.fromRGB(235, 70, 50)}):Play()
             TweenService:Create(thumb, ti, {Position = UDim2.new(0, 19, 0.5, -7), BackgroundColor3 = Color3.new(1, 1, 1)}):Play()
-            row.BackgroundColor3 = Color3.fromRGB(28, 20, 22); rst.Transparency = 0.65
+            row.BackgroundColor3 = Color3.fromRGB(20, 14, 15); rst.Transparency = 0.65
         else
             TweenService:Create(track, ti, {BackgroundColor3 = Color3.fromRGB(35, 35, 40)}):Play()
             TweenService:Create(thumb, ti, {Position = UDim2.new(0, 3, 0.5, -7), BackgroundColor3 = Color3.fromRGB(120, 120, 130)}):Play()
-            row.BackgroundColor3 = Color3.fromRGB(20, 20, 24); rst.Transparency = 0.85
+            row.BackgroundColor3 = Color3.fromRGB(12, 12, 14); rst.Transparency = 0.85
         end
         onFn(on)
     end
@@ -3376,7 +3409,7 @@ end
 local function numberInput(labelText, default, onChange, key)
     local row = Instance.new("Frame", currentCol)
     row.Size = UDim2.new(1, 0, 0, 38)
-    row.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    row.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
     local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.85; rst.Thickness = 1
@@ -3386,7 +3419,7 @@ local function numberInput(labelText, default, onChange, key)
     local box = Instance.new("TextBox", row)
     box.Size = UDim2.fromOffset(96, 24)
     box.Position = UDim2.new(1, -108, 0.5, -12)
-    box.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+    box.BackgroundColor3 = Color3.fromRGB(8, 8, 9)
     box.BorderSizePixel = 0
     box.Text = tostring(default)
     box.TextColor3 = Color3.new(1, 1, 1)
@@ -3412,7 +3445,7 @@ end
 local function labelRow(labelText, defaultVal)
     local row = Instance.new("Frame", currentCol)
     row.Size = UDim2.new(1, 0, 0, 36)
-    row.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    row.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
     local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.9; rst.Thickness = 1
@@ -3423,6 +3456,51 @@ local function labelRow(labelText, defaultVal)
     return valLabel
 end
 
+
+local activeDropdowns = {}
+local function addDropdownItem(titleText, item)
+    local dd = activeDropdowns[titleText]
+    if not dd then return end
+    for _, it in ipairs(dd.items) do
+        if it == item then return end
+    end
+    table.insert(dd.items, item)
+    table.sort(dd.items)
+    for _, ch in ipairs(dd.content:GetChildren()) do
+        if ch:IsA("Frame") and ch.LayoutOrder > 0 then
+            ch:Destroy()
+        end
+    end
+    table.clear(dd.refreshers)
+    for i, it in ipairs(dd.items) do
+        local row = Instance.new("Frame", dd.content)
+        row.Size = UDim2.new(1, 0, 0, dd.rowH); row.BackgroundColor3 = Color3.fromRGB(8, 8, 9); row.BorderSizePixel = 0; row.LayoutOrder = i
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+        local cb = Instance.new("Frame", row)
+        cb.Size = UDim2.fromOffset(16, 16); cb.Position = UDim2.new(0, 8, 0.5, -8); cb.BorderSizePixel = 0
+        Instance.new("UICorner", cb).CornerRadius = UDim.new(0, 4)
+        local ck = mkLabel(cb, "", UDim2.fromScale(1, 1), UDim2.new(0, 0, 0, -1), 12, Enum.Font.GothamBold, Color3.new(1, 1, 1), 2, Enum.TextXAlignment.Center)
+        mkLabel(row, it, UDim2.new(1, -34, 1, 0), UDim2.new(0, 32, 0, 0), 11, nil, Color3.fromRGB(180, 180, 180), 1)
+        local rb = Instance.new("TextButton", row); rb.Size = UDim2.fromScale(1, 1); rb.BackgroundTransparency = 1; rb.Text = ""
+        local function rf()
+            local on = dd.getState(it)
+            cb.BackgroundColor3 = on and Color3.fromRGB(235, 70, 50) or Color3.fromRGB(18, 18, 20)
+            ck.Text = on and "X" or ""
+        end
+        rb.MouseButton1Click:Connect(function() dd.setState(it, not dd.getState(it)); rf(); dd.updateBadge() end)
+        table.insert(dd.refreshers, rf)
+        rf()
+    end
+    local holder = dd.content.Parent
+    local open = (holder.Size.Y.Offset > 40)
+    local newContentH = 30 * #dd.items + 34
+    if open then
+        holder.Size = UDim2.new(1, 0, 0, 40 + newContentH)
+    end
+    dd.content.Size = UDim2.new(1, 0, 0, newContentH)
+    dd.updateBadge()
+end
+
 local function dropdown(titleText, items, getState, setState, key)
     local rowH = 28
     local contentH = 30 * #items + 34
@@ -3430,7 +3508,7 @@ local function dropdown(titleText, items, getState, setState, key)
     
     local holder = Instance.new("Frame", currentCol)
     holder.Size = UDim2.new(1, 0, 0, headH)
-    holder.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    holder.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
     holder.BorderSizePixel = 0
     holder.ClipsDescendants = true
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
@@ -3463,7 +3541,7 @@ local function dropdown(titleText, items, getState, setState, key)
     local function quickBtn(txt, xs, fn)
         local b = Instance.new("TextButton", quick)
         b.Size = UDim2.fromOffset(54, 24); b.Position = UDim2.fromOffset(xs, 0)
-        b.BackgroundColor3 = Color3.fromRGB(12, 12, 14); b.BorderSizePixel = 0
+        b.BackgroundColor3 = Color3.fromRGB(8, 8, 9); b.BorderSizePixel = 0
         b.Text = txt; b.TextColor3 = Color3.fromRGB(180, 180, 180); b.TextSize = 10; b.Font = Enum.Font.GothamBold
         Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
         b.MouseButton1Click:Connect(fn)
@@ -3473,7 +3551,7 @@ local function dropdown(titleText, items, getState, setState, key)
     
     for i, it in ipairs(items) do
         local row = Instance.new("Frame", content)
-        row.Size = UDim2.new(1, 0, 0, rowH); row.BackgroundColor3 = Color3.fromRGB(12, 12, 14); row.BorderSizePixel = 0; row.LayoutOrder = i
+        row.Size = UDim2.new(1, 0, 0, rowH); row.BackgroundColor3 = Color3.fromRGB(8, 8, 9); row.BorderSizePixel = 0; row.LayoutOrder = i
         Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
         local cb = Instance.new("Frame", row)
         cb.Size = UDim2.fromOffset(16, 16); cb.Position = UDim2.new(0, 8, 0.5, -8); cb.BorderSizePixel = 0
@@ -3483,7 +3561,7 @@ local function dropdown(titleText, items, getState, setState, key)
         local rb = Instance.new("TextButton", row); rb.Size = UDim2.fromScale(1, 1); rb.BackgroundTransparency = 1; rb.Text = ""
         local function rf()
             local on = getState(it)
-            cb.BackgroundColor3 = on and Color3.fromRGB(235, 70, 50) or Color3.fromRGB(28, 28, 32)
+            cb.BackgroundColor3 = on and Color3.fromRGB(235, 70, 50) or Color3.fromRGB(18, 18, 20)
             ck.Text = on and "X" or ""
         end
         rb.MouseButton1Click:Connect(function() setState(it, not getState(it)); rf(); updateBadge() end)
@@ -3513,6 +3591,16 @@ local function dropdown(titleText, items, getState, setState, key)
             updateBadge()
         end,
     }
+    
+    activeDropdowns[titleText] = {
+        items = items,
+        content = content,
+        getState = getState,
+        setState = setState,
+        refreshers = refreshers,
+        updateBadge = updateBadge,
+        rowH = rowH
+    }
 end
 
 local function teleportDropdown(titleText, items, onSelect)
@@ -3522,7 +3610,7 @@ local function teleportDropdown(titleText, items, onSelect)
     
     local holder = Instance.new("Frame", currentCol)
     holder.Size = UDim2.new(1, 0, 0, headH)
-    holder.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    holder.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
     holder.BorderSizePixel = 0
     holder.ClipsDescendants = true
     holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
@@ -3554,7 +3642,7 @@ local function teleportDropdown(titleText, items, onSelect)
     
     for i, it in ipairs(items) do
         local row = Instance.new("Frame", content)
-        row.Size = UDim2.new(1, 0, 0, rowH); row.BackgroundColor3 = Color3.fromRGB(12, 12, 14); row.BorderSizePixel = 0; row.LayoutOrder = i
+        row.Size = UDim2.new(1, 0, 0, rowH); row.BackgroundColor3 = Color3.fromRGB(8, 8, 9); row.BorderSizePixel = 0; row.LayoutOrder = i
         Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
         mkLabel(row, ">  " .. it, UDim2.new(1, -16, 1, 0), UDim2.new(0, 10, 0, 0), 11, Enum.Font.GothamBold, Color3.fromRGB(180, 180, 180), 1)
         local rb = Instance.new("TextButton", row); rb.Size = UDim2.fromScale(1, 1); rb.BackgroundTransparency = 1; rb.Text = ""
@@ -3589,7 +3677,7 @@ end
 local function slider(lbl, minV, maxV, defV, fn, key)
     local row = Instance.new("Frame", currentCol)
     row.Size = UDim2.new(1, 0, 0, 54)
-    row.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    row.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
     row.BorderSizePixel = 0; row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
     local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.85; rst.Thickness = 1
@@ -4013,7 +4101,7 @@ do
     inputRow.Size = UDim2.new(1, 0, 0, 32); inputRow.BackgroundTransparency = 1
     inputRow.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     local nameBox = Instance.new("TextBox", inputRow)
-    nameBox.Size = UDim2.new(1, -74, 1, 0); nameBox.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+    nameBox.Size = UDim2.new(1, -74, 1, 0); nameBox.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
     nameBox.Text = ""; nameBox.PlaceholderText = "new profile name..."; nameBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 160)
     nameBox.TextColor3 = Color3.fromRGB(235, 235, 240); nameBox.TextSize = 12; nameBox.Font = Enum.Font.Gotham
     nameBox.ClearTextOnFocus = false; nameBox.BorderSizePixel = 0
@@ -4026,7 +4114,7 @@ do
     Instance.new("UICorner", createBtn).CornerRadius = UDim.new(0, 6)
 
     local ddButton = Instance.new("TextButton", currentCol)
-    ddButton.Size = UDim2.new(1, 0, 0, 28); ddButton.BackgroundColor3 = Color3.fromRGB(24, 24, 28); ddButton.AutoButtonColor = false
+    ddButton.Size = UDim2.new(1, 0, 0, 28); ddButton.BackgroundColor3 = Color3.fromRGB(15, 15, 17); ddButton.AutoButtonColor = false
     ddButton.Text = ""; ddButton.BorderSizePixel = 0; ddButton.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     Instance.new("UICorner", ddButton).CornerRadius = UDim.new(0, 6)
     local dds = Instance.new("UIStroke", ddButton); dds.Color = Color3.fromRGB(235, 70, 50); dds.Transparency = 0.5
@@ -4036,7 +4124,7 @@ do
 
     local ddList = Instance.new("Frame", currentCol)
     ddList.Size = UDim2.new(1, 0, 0, 0); ddList.AutomaticSize = Enum.AutomaticSize.Y
-    ddList.BackgroundColor3 = Color3.fromRGB(28, 28, 32); ddList.BorderSizePixel = 0; ddList.Visible = false
+    ddList.BackgroundColor3 = Color3.fromRGB(18, 18, 20); ddList.BorderSizePixel = 0; ddList.Visible = false
     ddList.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
     Instance.new("UICorner", ddList).CornerRadius = UDim.new(0, 6)
     local ddll = Instance.new("UIListLayout", ddList); ddll.Padding = UDim.new(0, 2); ddll.SortOrder = Enum.SortOrder.LayoutOrder
@@ -4074,7 +4162,7 @@ do
         else
             for i, nm in ipairs(names) do
                 local opt = Instance.new("TextButton", ddList)
-                opt.Size = UDim2.new(1, 0, 0, 24); opt.BackgroundColor3 = Color3.fromRGB(45, 45, 52); opt.Font = Enum.Font.Gotham
+                opt.Size = UDim2.new(1, 0, 0, 24); opt.BackgroundColor3 = Color3.fromRGB(24, 24, 28); opt.Font = Enum.Font.Gotham
                 opt.Text = "  " .. nm; opt.TextXAlignment = Enum.TextXAlignment.Left; opt.TextColor3 = Color3.fromRGB(235, 235, 240)
                 opt.TextSize = 12; opt.BorderSizePixel = 0; opt.LayoutOrder = i
                 Instance.new("UICorner", opt).CornerRadius = UDim.new(0, 5)
@@ -4121,6 +4209,11 @@ SB_header.InputBegan:Connect(function(i)
     end
 end)
 Sidebar.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        isDrag = true; dStart = i.Position; dPos = MF.Position
+    end
+end)
+ContentHeader.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
         isDrag = true; dStart = i.Position; dPos = MF.Position
     end
@@ -4381,6 +4474,25 @@ State.myPlot = findMyPlot()
 rebuildPlacedItemsCache()
 startCurrentAuctionESPManager()
 startAutoAcceptOffers()
+
+-- Dynamically watch for newly spawned garages to add to the Auctions selection list
+local function listenToNewGarages()
+    local debris = WS:FindFirstChild("_Debris")
+    local garages = debris and debris:FindFirstChild("Garages")
+    if garages then
+        local function onChild(g)
+            task.wait(0.5)
+            if g and g.Name ~= "" then
+                pcall(addDropdownItem, "Auctions", g.Name)
+            end
+        end
+        track(garages.ChildAdded:Connect(onChild))
+        for _, g in ipairs(garages:GetChildren()) do
+            task.spawn(onChild, g)
+        end
+    end
+end
+pcall(listenToNewGarages)
 
 MF.Size = UDim2.new(0,0,0,0)
 MF.Position = UDim2.new(0.5, 0, 0.5, 0)

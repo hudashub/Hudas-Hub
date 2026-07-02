@@ -1,0 +1,2028 @@
+--[[
+    ============================================================
+       HUDAS HUB  -  EVOMON
+       Stealth auto-farm hub for Evomon[Release].
+         • Wild Evomon ESP   (species + level + distance, highlight)
+         • Auto-Navigate     (PATHFIND WALK to NPCs / wild pets — no teleport)
+         • Auto-Battle Farm   (walk -> enterPetBattle -> ReqAutoBattle loop)
+         • Auto-Battle resolve (any battle you enter is auto-played)
+         • Rewards            (redeem gift codes / claim daily / claim mail)
+       Built on the canonical Hudas Hub template (red/black, fab, profiles).
+
+       NOTE: Talent/Shiny of a ROAMING wild Evomon is NOT knowable —
+       the server only rolls it on catch, so the client never receives it
+       beforehand. ESP therefore shows species + level + distance only.
+    ============================================================
+]]
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local HttpService       = game:GetService("HttpService")
+local VirtualUser       = game:GetService("VirtualUser")
+local PathfindingService= game:GetService("PathfindingService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer       = Players.LocalPlayer
+
+-- ============================================================
+--  HUB CONFIG
+-- ============================================================
+local HUB = {
+    name      = "EVOMON HUB",
+    subtitle  = "Evomon  •  Auto-Farm / Smart Battle / Catch",
+    guiName   = "EvomonHudasHub_Panel",
+    profDir   = "EvomonHudasHub_Profiles",
+    logoFile  = "HudasHub_Logo.png",
+    logoAsset = "",
+}
+
+-- ============================================================
+--  Single-instance guard
+-- ============================================================
+_G.__HudasHub_gen = (_G.__HudasHub_gen or 0) + 1
+local MY_GEN = _G.__HudasHub_gen
+local function alive() return _G.__HudasHub_gen == MY_GEN end
+pcall(function()
+    if not getgc then return end
+    for _, o in getgc(true) do
+        if type(o) == "table" and rawget(o, "__HudasHubFlags") then
+            for k, v in pairs(o) do
+                if type(v) == "boolean" and k ~= "__HudasHubFlags" then rawset(o, k, false) end
+            end
+        end
+    end
+end)
+-- drop event connections from a previous run
+if _G.__Evomon_conns then
+    for _, c in ipairs(_G.__Evomon_conns) do pcall(function() c:Disconnect() end) end
+end
+_G.__Evomon_conns = {}
+local function track(conn) table.insert(_G.__Evomon_conns, conn); return conn end
+
+-- ============================================================
+--  FEATURE STATE
+-- ============================================================
+local F = {
+    __HudasHubFlags = true,
+    autoFarm    = false,   -- walk to nearest wild + engage in a loop
+    autoBattle  = false,   -- auto-play any battle you enter (server AI)
+    smartBattle = false,   -- manual driver: super-effective element move, else strongest
+    critPriority= false,   -- cast crit-setup skill (Store Power/Critical Focus) at battle start
+    fastBattle  = false,   -- CLIENT-SIDE battle playback speedup (bypasses paid 2X)
+    autoCatch   = false,   -- master auto-catch; ball per category is chosen by the dropdowns
+    stopAfterShiny = true, -- auto-off Auto Catch after a guaranteed (King/Prism ball) shiny throw
+    spFarm      = false,   -- Shiny+Prismatic Farm: build prismatic pity, park at max-1, King the shiny
+    autoRelease  = false,   -- auto-release (free) evomon below the keep filters
+    keepShiny    = true,    -- never release shiny evomon
+    keepPrismatic= true,    -- never release prismatic (colorful) evomon
+    antiAfk     = true,
+}
+-- AUTO-RELEASE keep-talent threshold (exclusive chips, keyed by talentId).
+-- talent ranks: D<C<B<A<S<SSS. Keep pets whose talent rank >= the selected one.
+local TALENT_RANK = { [6] = 0, [1] = 1, [2] = 2, [3] = 3, [4] = 4, [5] = 5 } -- D,C,B,A,S,SSS
+local keepTalent = { [3] = false, [4] = true, [5] = false }  -- A / S / SSS (default: keep S+)
+local function keepTalentRank()
+    local r = 4
+    for tid, on in pairs(keepTalent) do if on then r = TALENT_RANK[tid] or 4 end end
+    return r
+end
+-- AUTO-CATCH ball per category, chosen via dropdowns (id 0 = Skip -> give up the
+-- catch and leave). Defaults mirror the old rule-based logic: shiny gets a 100%
+-- ball, prismatic-only + commons are skipped to save pity / not fill the team.
+local BALL_OPTIONS = {
+    { id = 0,       name = "Skip (leave)"   },
+    { id = 2000015, name = "Normal Ball"    },
+    { id = 2000016, name = "Advanced Ball"  },
+    { id = 2000017, name = "King Ball"      },
+    { id = 2000018, name = "Prismatic Ball" },
+}
+local function ballName(id)
+    for _, b in ipairs(BALL_OPTIONS) do if b.id == id then return b.name end end
+    return "Skip (leave)"
+end
+local catchBall = {
+    shiny      = 2000018,  -- Prismatic Ball (100% catch)
+    prism      = 0,        -- Skip: leave prismatic-only, save pity for shiny+prism
+    shinyPrism = 2000017,  -- King Ball (100% catch)
+    normal     = 0,        -- Skip: leave plain commons
+}
+-- SHINY + PRISMATIC FARM: catch normals with a cheap ball to build the species'
+-- prismatic pity (+1 per catch); at pity max-1 PARK it (leave normals — defeats
+-- keep building shiny pity, the guaranteed prismatic stays reserved); any shiny
+-- at the catch screen gets the catch ball, and on a parked pity that catch is
+-- ALSO the guaranteed prismatic = shiny + prismatic. Pity is PER-SPECIES.
+local spBuildBall = 2000015   -- Build Ball: cheap pity builder (Common)
+local spCatchBall = 2000017   -- Catch Ball: secures the shiny / combo (King)
+-- controls registry (flagKey -> {get,set}); declared here so the catch watcher can
+-- flip the Auto-Catch Rare toggle off after a successful shiny catch. Populated by
+-- makeToggle during UI build.
+local controls = {}
+-- battle playback multiplier (exclusive chips). Game's paid feature caps at 2X.
+local battleSpeedMul = { [2] = false, [3] = true, [4] = false, [6] = false, [8] = false, [10] = false }
+local function activeBattleSpeed()
+    local s = 3
+    for v, on in pairs(battleSpeedMul) do if on then s = v end end
+    return s
+end
+-- max ESP / farm search distance (studs); chips select one
+local distFilter = { [200] = false, [400] = true, [800] = false, [99999] = false }
+local function activeMaxDist()
+    local d = 400
+    for v, on in pairs(distFilter) do if on then d = v end end
+    return d
+end
+local speciesFilter = ""   -- if non-empty, ESP/farm only match species whose name contains this
+
+-- ============================================================
+--  GAME GLUE
+-- ============================================================
+local CM, CN
+pcall(function()
+    CM = require(ReplicatedStorage.Core.Config.ConfigDataManager)
+    CN = require(ReplicatedStorage.Core.Config.ConfigConst).ConfigName
+end)
+-- Re-resolve the wild-creature cache on every call. Travelling to another area
+-- (e.g. Dusk Town) can rebuild RuntimeCache, so a one-time captured reference goes
+-- stale and the farm stops detecting wilds. This always returns the live folder.
+pcall(function() workspace:WaitForChild("RuntimeCache", 10) end)
+local function creatureCache()
+    local rc = workspace:FindFirstChild("RuntimeCache")
+    rc = rc and rc:FindFirstChild("RuntimeCacheServer")
+    return rc and rc:FindFirstChild("CreatureModelCache")
+end
+
+local BattleRemote = ReplicatedStorage:FindFirstChild("Remote")
+BattleRemote = BattleRemote and BattleRemote:FindFirstChild("Battle")
+local ReqEnterPetBattle = BattleRemote and BattleRemote:FindFirstChild("ReqEnterPetBattle")
+local ReqAutoBattle     = BattleRemote and BattleRemote:FindFirstChild("ReqAutoBattle")
+local ReqOperateBattle  = BattleRemote and BattleRemote:FindFirstChild("ReqOperateBattle")
+local ReqCanEnterBattle = BattleRemote and BattleRemote:FindFirstChild("ReqCanEnterBattle")
+local BattleService, ControllerMgr, BattleDataGet
+pcall(function() BattleService = require(ReplicatedStorage.Script.Battle.BattleService) end)
+pcall(function() ControllerMgr  = require(ReplicatedStorage.Core.Controller.ControllerManager) end)
+pcall(function() BattleDataGet  = require(ReplicatedStorage.Script.MainBattleWindow.BattleDataGetModule) end)
+local function getCtrl(name) if ControllerMgr and ControllerMgr.getController then local ok, c = pcall(ControllerMgr.getController, name); if ok then return c end end end
+
+-- crit-boost skill detector: a skill counts if it (or its main effect) grants any
+-- known crit buff id. Cached per-skillId. Verified Store Power / Critical Focus /
+-- Steel Smash / Blaze Storm resolve true.
+local CRIT_BUFFS = {[4000025]=true,[4000026]=true,[4017009]=true,[4017010]=true,[4017011]=true,[15024]=true,[4002016]=true,[4002017]=true,[4002018]=true}
+local critSkillCache = {}
+local function deepHasCritBuff(t, depth)
+    if depth > 4 or type(t) ~= "table" then return false end
+    for _, v in pairs(t) do
+        if type(v) == "number" and CRIT_BUFFS[v] then return true end
+        if type(v) == "table" and deepHasCritBuff(v, depth + 1) then return true end
+    end
+    return false
+end
+local function isCritSkill(skillId)
+    if not skillId then return false end
+    if critSkillCache[skillId] ~= nil then return critSkillCache[skillId] end
+    local hit = false
+    pcall(function()
+        local cfg = CM and CM.getConfig(CN.SKILL, skillId)
+        if type(cfg) == "table" then
+            if deepHasCritBuff(cfg, 0) then hit = true end
+            if not hit and cfg.mainEffect then
+                local eff = CM.getConfig(CN.SKILL_EFFECT, cfg.mainEffect)
+                if deepHasCritBuff(eff, 0) then hit = true end
+            end
+        end
+    end)
+    critSkillCache[skillId] = hit
+    return hit
+end
+
+local TYPE_WILD, TYPE_NPC = 3, 5
+
+-- name lookups (cached)
+local nameCache = {}
+local function petName(cfgId)
+    if not cfgId then return "Evomon" end
+    local key = "p" .. tostring(cfgId)
+    if nameCache[key] then return nameCache[key] end
+    local nm = "Evomon"
+    pcall(function()
+        local c = CM and CM.getConfig(CN.PET, cfgId)
+        if type(c) == "table" and type(c.name) == "string" then nm = c.name end
+    end)
+    nameCache[key] = nm; return nm
+end
+local function npcName(cfgId)
+    if not cfgId then return "NPC" end
+    local key = "n" .. tostring(cfgId)
+    if nameCache[key] then return nameCache[key] end
+    local nm = "NPC " .. tostring(cfgId)
+    pcall(function()
+        local c = CM and CM.getConfig(CN.NPC, cfgId)
+        if type(c) == "table" then
+            -- prefer the exact in-game over-head display name
+            local n = c.npcHeadShowName or c.npcName or c.name
+            if type(n) == "string" and n ~= "" then nm = n end
+        end
+    end)
+    nameCache[key] = nm; return nm
+end
+
+-- best-effort level read (talent/shiny are impossible; level usually is too,
+-- but try a few sources and cache the result per-uid so it's cheap)
+local levelCache = {}
+local function resolveLevel(model, uid)
+    if levelCache[uid] ~= nil then return levelCache[uid] or nil end
+    local lv
+    for _, k in ipairs({ "level", "Level", "lv", "Lv", "petLevel" }) do
+        local v = model:GetAttribute(k); if type(v) == "number" then lv = v break end
+    end
+    if not lv then
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local m = tostring(d.Text):match("Lv%.?%s*(%d+)")
+                if m then lv = tonumber(m); break end
+            end
+        end
+    end
+    levelCache[uid] = lv or false
+    return lv
+end
+
+local function myRoot()
+    local ch = LocalPlayer.Character
+    return ch and ch:FindFirstChild("HumanoidRootPart"), ch and ch:FindFirstChildOfClass("Humanoid")
+end
+
+-- enumerate creatures of a type within maxDist; returns array {uid,model,part,pos,dist,cfgId}
+local function gather(ctype, maxDist, speciesText)
+    local out = {}
+    local cache = creatureCache()
+    if not cache then return out end
+    local root = myRoot()
+    if not root then return out end
+    local myPos = root.Position
+    for _, m in ipairs(cache:GetChildren()) do
+        if m:GetAttribute("type") == ctype then
+            local ok, pivot = pcall(function() return m:GetPivot() end)
+            if ok then
+                local pos = pivot.Position
+                local dist = (pos - myPos).Magnitude
+                if dist <= maxDist then
+                    local cfgId = m:GetAttribute("configId")
+                    local nm = (ctype == TYPE_WILD) and petName(cfgId) or npcName(cfgId)
+                    if speciesText == "" or string.find(string.lower(nm), string.lower(speciesText), 1, true) then
+                        local part = m:FindFirstChildWhichIsA("BasePart", true) or (m.PrimaryPart)
+                        out[#out + 1] = { uid = m.Name, model = m, part = part, pos = pos,
+                                          dist = dist, cfgId = cfgId, name = nm }
+                    end
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.dist < b.dist end)
+    return out
+end
+
+local function nearestWild()
+    local list = gather(TYPE_WILD, activeMaxDist(), speciesFilter)
+    return list[1]
+end
+
+-- ============================================================
+--  BATTLE STATE + TRIGGER
+-- ============================================================
+local inBattle = false
+local pendingEntry = false
+
+-- clear a stuck battle-entry camera transition (the black screen) when the
+-- server never confirms the battle, instead of waiting out the game's 7s timeout
+local function clearBattleTransition()
+    pcall(function()
+        local cc = getCtrl("BattleChoreoController")
+        if cc and typeof(cc.cancelPreEnterBattleEffect) == "function" then
+            cc.cancelPreEnterBattleEffect()
+        end
+    end)
+end
+
+-- ask the server if we may start this wild battle (avoids firing into a reject,
+-- which is what leaves the camera stuck on black)
+local function canEnter(uid)
+    if not ReqCanEnterBattle then return true end
+    local ok, res = pcall(function() return ReqCanEnterBattle:InvokeServer(uid) end)
+    if not ok then return true end
+    if res == false then return false end
+    if type(res) == "number" and res ~= 20000 then return false end
+    return true
+end
+
+-- CRIT PRIORITY: at battle start, if the active pet has a crit-setup skill
+-- (Store Power / Critical Focus / Steel Smash …) with PP, cast it once. Fully
+-- guarded — a wrong/early operate is simply rejected by the server, no harm.
+local function doCritOpener()
+    pcall(function()
+        local mb = getCtrl("MainBattleWindowController")
+        if not (mb and typeof(mb.getBattleDataCache) == "function" and BattleDataGet) then return end
+        local cache = mb.getBattleDataCache()
+        if type(cache) ~= "table" then return end
+        local act = BattleDataGet.getActivePetsData(cache)
+        local myPet = act and act.selfPets and act.selfPets[1]
+        if type(myPet) ~= "table" or type(myPet.skills) ~= "table" then return end
+        local chosen
+        for _, sk in ipairs(myPet.skills) do
+            local sid = sk.id or sk.skillId
+            local pp = sk.pp
+            if sid and isCritSkill(sid) and (pp == nil or pp > 0) then
+                local isSetup = (sk.skillCategory == 3) or (sk.aiType and tostring(sk.aiType):find("Buff"))
+                if isSetup then chosen = sk; break end
+                if not chosen then chosen = sk end
+            end
+        end
+        if not chosen or not ReqOperateBattle then return end
+        local myCamp = myPet.campId or 1
+        ReqOperateBattle:InvokeServer({
+            actionType   = 1,
+            skillType    = chosen.type or chosen.skillType or 1,
+            skillId      = chosen.id or chosen.skillId,
+            sourceUid    = tostring(myPet.uid),
+            sourcePos    = myPet.pos or myPet.groupPos or 1,
+            targetPos    = 1,
+            targetCampId = (myCamp == 1) and 2 or 1,
+        })
+    end)
+end
+
+-- SMART BATTLE: element-aware manual driver. Picks a super-effective damage move
+-- (skill element restrains an enemy element) if one exists; otherwise the highest
+-- power damage move. Crit-setup skill takes turn 1 when Crit Priority is also on.
+local skillElemCache = {}
+local function skillElement(id)
+    if skillElemCache[id] ~= nil then return skillElemCache[id] or nil end
+    local el
+    pcall(function() local c = CM and CM.getConfig(CN.SKILL, id); if type(c) == "table" then el = c.element end end)
+    skillElemCache[id] = el or false
+    return el
+end
+local function isSuperEffective(myEl, enemyEls)
+    if not myEl or type(enemyEls) ~= "table" then return false end
+    local c = CM and CM.getConfig(CN.ELEMENT_COUNTER, myEl)
+    if type(c) ~= "table" or type(c.restraint) ~= "table" then return false end
+    local set = {}; for _, e in ipairs(c.restraint) do set[e] = true end
+    for _, ee in ipairs(enemyEls) do if set[ee] then return true end end
+    return false
+end
+local function pickSmartMove(firstTurn)
+    local mb = getCtrl("MainBattleWindowController")
+    if not (mb and typeof(mb.getBattleDataCache) == "function" and BattleDataGet) then return nil end
+    local cache = mb.getBattleDataCache()
+    if type(cache) ~= "table" then return nil end
+    local act = BattleDataGet.getActivePetsData(cache)
+    local my = act and act.selfPets and act.selfPets[1]
+    local en = act and act.enemyPets and act.enemyPets[1]
+    if type(my) ~= "table" or type(my.skills) ~= "table" then return nil end
+    local enemyEls = (type(en) == "table" and type(en.elements) == "table") and en.elements or {}
+    -- my camp + current energy. ULTIMATE skills (type 2, have a `cost`) need
+    -- energy; firing one without enough energy is rejected and the turn falls
+    -- back to a normal attack — the bug. So skills are only "usable" if a
+    -- regular move has PP, or an ultimate's cost is covered by current energy.
+    local myCamp = 1
+    pcall(function() if BattleDataGet.getLocalPlayerCampId then myCamp = BattleDataGet.getLocalPlayerCampId(cache) or 1 end end)
+    local energy = 0
+    pcall(function()
+        local camp = cache["camp" .. tostring(myCamp)]
+        if type(camp) == "table" and type(camp.trainers) == "table" then
+            for _, tr in pairs(camp.trainers) do
+                if type(tr) == "table" and type(tr.energy) == "number" then energy = math.max(energy, tr.energy) end
+            end
+        end
+    end)
+    local function usable(sk)
+        if sk.type == 2 or sk.cost then return energy >= (sk.cost or 0) end
+        return (sk.pp == nil or sk.pp > 0)
+    end
+    -- turn 1: crit setup skill if Crit Priority on
+    if firstTurn and F.critPriority then
+        for _, sk in ipairs(my.skills) do
+            local sid = sk.id or sk.skillId
+            if sid and isCritSkill(sid) and usable(sk)
+               and ((sk.skillCategory == 3) or (sk.aiType and tostring(sk.aiType):find("Buff"))) then
+                return sk, my, myCamp
+            end
+        end
+    end
+    -- USABLE damage skills: strongest super-effective first, else strongest
+    local best, bestPow, sup, supPow = nil, -1, nil, -1
+    for _, sk in ipairs(my.skills) do
+        local sid = sk.id or sk.skillId
+        local isDmg = (sk.skillCategory == 1) or (sk.skillCategory == 2) or (sk.aiType == "Damage")
+        if sid and isDmg and usable(sk) then
+            local pw = sk.power or 0
+            if isSuperEffective(skillElement(sid), enemyEls) and pw > supPow then sup, supPow = sk, pw end
+            if pw > bestPow then best, bestPow = sk, pw end
+        end
+    end
+    return (sup or best), my, myCamp
+end
+local function operateSkill(sk, my, myCamp)
+    if not (sk and my and ReqOperateBattle) then return end
+    local enemyCamp = (myCamp == 1) and 2 or 1
+    pcall(function()
+        ReqOperateBattle:InvokeServer({
+            actionType   = 1,
+            skillType    = sk.type or sk.skillType or 1,
+            skillId      = sk.id or sk.skillId,
+            sourceUid    = tostring(my.uid),
+            sourcePos    = 1,
+            targetPos    = 1,
+            targetCampId = enemyCamp,
+        })
+    end)
+end
+
+do
+    local function hook(remoteName, fn)
+        local r = BattleRemote and BattleRemote:FindFirstChild(remoteName)
+        if r then track(r.OnClientEvent:Connect(fn)) end
+    end
+    hook("ResEnterBattle", function()
+        inBattle = true
+        pendingEntry = false
+        task.delay(1.4, function()
+            if not (inBattle and alive()) then return end
+            if F.smartBattle then return end   -- smart driver handles it instead
+            if F.critPriority then doCritOpener() end
+            if F.autoBattle then
+                task.delay(0.6, function()
+                    if F.autoBattle and inBattle and ReqAutoBattle then
+                        pcall(function() ReqAutoBattle:InvokeServer(true) end)
+                    end
+                end)
+            end
+        end)
+    end)
+    hook("ResEnterBattleFail", function() inBattle = false; pendingEntry = false; clearBattleTransition() end)
+    hook("ResSettleBattle",   function() inBattle = false; pendingEntry = false end)
+end
+
+-- smart-battle turn driver. Reads the live battle cache directly (NOT the
+-- inBattle flag, which can go stale across a reload) and acts when status is
+-- WAIT_OPERATION (2) on a new round. round-dedup avoids double-firing a turn;
+-- getCanOperate() pulses, so it's only a soft confirm, not the trigger.
+task.spawn(function()
+    local actedAt = nil       -- os.clock of our last operate while in this WAIT_OPERATION phase
+    local firstOfBattle = true
+    while alive() do
+        if F.smartBattle then
+            local mb = getCtrl("MainBattleWindowController")
+            local bc
+            if mb and typeof(mb.getBattleDataCache) == "function" then pcall(function() bc = mb.getBattleDataCache() end) end
+            if type(bc) == "table" and bc.sessionPhase == "active" and bc.status == 2 then
+                local can = true
+                if typeof(mb.getCanOperate) == "function" then pcall(function() can = mb.getCanOperate() end) end
+                -- act when it's our turn; re-fire if we acted but the phase is still
+                -- WAIT_OPERATION after ~1.6s (the move was rejected/premature — the
+                -- round counter can tick before our input is actually accepted).
+                if can and (actedAt == nil or (os.clock() - actedAt) > 1.6) then
+                    local sk, my, myCamp = pickSmartMove(firstOfBattle)
+                    if sk and my then operateSkill(sk, my, myCamp); actedAt = os.clock(); firstOfBattle = false end
+                end
+            else
+                actedAt = nil     -- left the operate phase (settle/anim/catch) -> re-arm for next turn
+                if type(bc) ~= "table" then firstOfBattle = true end   -- battle ended
+            end
+        else
+            actedAt = nil; firstOfBattle = true
+        end
+        task.wait(0.3)
+    end
+end)
+
+-- Use the RAW remote, not BattleService.enterPetBattle. enterPetBattle enqueues
+-- a pre-enter camera fade that gets stuck on black if the server is slow to
+-- confirm; the raw FireServer just starts the battle (verified: triggers
+-- ResEnterBattle reliably, even from ~20 studs) with no fade to get stuck.
+local function startWildBattle(uid)
+    pendingEntry = true
+    if ReqEnterPetBattle then
+        pcall(function() ReqEnterPetBattle:FireServer(uid) end)
+    elseif BattleService and typeof(BattleService.enterPetBattle) == "function" then
+        pcall(function() BattleService.enterPetBattle(uid) end)
+    end
+end
+
+-- ============================================================
+--  FAST BATTLE  (client-side playback speed override)
+--  All BattleChoreo nodes scale animation timing by
+--  MainBattleWindowController.getBattlePlaybackSpeed(). The game gates 2X
+--  behind a paid privilege, but the multiplier itself is purely client-side.
+--  We wrap it: while F.fastBattle is on, return our chosen multiplier;
+--  otherwise defer to the game's original (paid 2X / 1X). Installed once;
+--  _G holds the TRUE original so re-exec never stacks wrappers.
+-- ============================================================
+pcall(function()
+    local MBWC = require(ReplicatedStorage.Controller.MainBattleWindowController)
+    if typeof(MBWC.getBattlePlaybackSpeed) == "function" then
+        if not _G.__Evomon_origSpeed then _G.__Evomon_origSpeed = MBWC.getBattlePlaybackSpeed end
+        MBWC.getBattlePlaybackSpeed = function(...)
+            if F.fastBattle then return activeBattleSpeed() end
+            return _G.__Evomon_origSpeed(...)
+        end
+    end
+end)
+
+-- ============================================================
+--  NAVIGATION  (pathfind WALK — no teleport, plausible speed)
+-- ============================================================
+local navToken = 0
+local navStatus = "idle"
+local function stopNav()
+    navToken = navToken + 1
+    navStatus = "idle"
+    -- cancel any residual MoveTo so the player regains control immediately
+    local r, h = myRoot()
+    if r and h then pcall(function() h:MoveTo(r.Position) end) end
+end
+
+-- walk to a world position; returns when arrived / failed / cancelled
+local function walkTo(targetPos)
+    navToken = navToken + 1
+    local myTok = navToken
+    local root, hum = myRoot()
+    if not (root and hum) then navStatus = "no character"; return false end
+    navStatus = "walking"
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 3, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 6,
+    })
+    local okC = pcall(function() path:ComputeAsync(root.Position, targetPos) end)
+    local waypoints = (okC and path.Status == Enum.PathStatus.Success) and path:GetWaypoints() or nil
+
+    local function moveStep(pos)
+        if navToken ~= myTok or not alive() then return false end
+        local _, h = myRoot()
+        if not h then return false end
+        h:MoveTo(pos)
+        local done = false
+        local conn
+        conn = h.MoveToFinished:Connect(function() done = true end)
+        local t = 0
+        while not done and t < 4 and navToken == myTok and alive() do task.wait(0.1); t = t + 0.1 end
+        if conn then conn:Disconnect() end
+        return navToken == myTok
+    end
+
+    if waypoints then
+        for _, wp in ipairs(waypoints) do
+            if navToken ~= myTok or not alive() then navStatus = "cancelled"; return false end
+            if wp.Action == Enum.PathWaypointAction.Jump then local _, h = myRoot(); if h then h.Jump = true end end
+            if not moveStep(wp.Position) then navStatus = "cancelled"; return false end
+        end
+    else
+        -- no path -> direct (best-effort); step toward the target in chunks
+        for _ = 1, 30 do
+            if navToken ~= myTok or not alive() then navStatus = "cancelled"; return false end
+            local r = myRoot()
+            if not r then break end
+            if (r.Position - targetPos).Magnitude < 8 then break end
+            if not moveStep(targetPos) then navStatus = "cancelled"; return false end
+        end
+    end
+    if navToken == myTok then navStatus = "arrived" end
+    return navToken == myTok
+end
+
+-- ============================================================
+--  ANTI-AFK
+-- ============================================================
+track(LocalPlayer.Idled:Connect(function()
+    if not F.antiAfk then return end
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end))
+
+-- ============================================================
+--  AUTO-FARM LOOP  (walk -> engage -> wait battle -> repeat)
+-- ============================================================
+-- Wild Evomon roam, so we can't walk to a captured position — chase the LIVE
+-- model, re-targeting as it moves, until close (or a time budget runs out). The
+-- server tolerates entry from ~20+ studs, so we don't need to be on top of it.
+local function walkToCreature(uid, stopDist, maxTime)
+    navToken = navToken + 1
+    local myTok = navToken
+    stopDist = stopDist or 16; maxTime = maxTime or 12
+    navStatus = "walking"
+    local t0 = os.clock()
+    while navToken == myTok and alive() do
+        local cc = creatureCache()
+        local model = cc and cc:FindFirstChild(uid)
+        if not model then navStatus = "target gone"; return false end
+        local r, h = myRoot()
+        if not (r and h) then return false end
+        local ok, piv = pcall(function() return model:GetPivot() end)
+        if not ok then return false end
+        local d = (piv.Position - r.Position).Magnitude
+        if d <= stopDist then navStatus = "arrived"; return true end
+        if os.clock() - t0 > maxTime then navStatus = "timeout"; return d <= stopDist + 24 end
+        h:MoveTo(piv.Position)
+        task.wait(0.3)
+    end
+    return false
+end
+
+task.spawn(function()
+    while alive() do
+        if F.autoFarm and not inBattle then
+            local c = nearestWild()
+            if c then
+                walkToCreature(c.uid, 16, 12)   -- chase the roaming wild
+                -- engage if still farming, not in battle, and the creature still
+                -- exists. NO canEnter gate — it returns BATTLE_IN_PROGRESS at range
+                -- and would block every engage; the raw FireServer is tolerant and
+                -- the server is the real authority.
+                local cc0 = creatureCache()
+                local model = cc0 and cc0:FindFirstChild(c.uid)
+                if F.autoFarm and not inBattle and model then
+                    startWildBattle(c.uid)
+                    local t = 0
+                    while alive() and F.autoFarm and not inBattle and t < 3 do task.wait(0.25); t = t + 0.25 end
+                    if not inBattle then
+                        clearBattleTransition()   -- server didn't confirm -> clear any stuck fade
+                        pendingEntry = false
+                        task.wait(0.8)
+                    else
+                        while alive() and inBattle do task.wait(0.5) end
+                        task.wait(0.5)
+                    end
+                else
+                    task.wait(0.4)
+                end
+            else
+                task.wait(1.0)
+            end
+        else
+            task.wait(0.4)
+        end
+    end
+end)
+
+-- Release walk control the instant Auto-Farm is switched off, so an in-progress
+-- chase doesn't keep issuing MoveTo and commandeering the character (the
+-- "can't walk after turning it off" bug). stopNav() bumps navToken which makes
+-- walkToCreature exit immediately; MoveTo(self) cancels any residual movement.
+task.spawn(function()
+    local prev = false
+    while alive() do
+        if prev and not F.autoFarm then
+            stopNav()
+            local r, h = myRoot()
+            if r and h then pcall(function() h:MoveTo(r.Position) end) end
+        end
+        prev = F.autoFarm
+        task.wait(0.12)
+    end
+end)
+
+-- safety: keep auto-battle asserted while a battle is live and toggle is on
+task.spawn(function()
+    while alive() do
+        if F.autoBattle and not F.smartBattle and inBattle and ReqAutoBattle then
+            pcall(function() ReqAutoBattle:InvokeServer(true) end)
+        end
+        task.wait(1.2)
+    end
+end)
+
+-- ============================================================
+--  AUTO-CATCH RARE  (shiny / prismatic only)
+--  When the post-battle catch window opens and the target is shiny or colorful
+--  (prismatic), select the chosen ball via the game's own ball-cycle handler and
+--  throw it with handleCatchButtonClick — i.e. exactly what a real player does,
+--  so server-side validation is satisfied. Shiny/colorful is known client-side
+--  ONLY at this point (catch phase), which is why this is possible.
+-- ============================================================
+local CatchCtrl
+pcall(function() CatchCtrl = require(ReplicatedStorage.Controller.BattleCatchPetWindowController) end)
+-- per-species pity reader (the same data the catch screen's Obtain Rate panel
+-- shows). getPityInfo = SHINY pity (x/600), getColorPityInfo = PRISMATIC/sparkle
+-- pity (x/150). Both keyed by the PET configId.
+local ShinyLottery
+pcall(function() ShinyLottery = require(ReplicatedStorage.Script.ShinyPetLottery.ShinyPetLotteryService) end)
+local function pityInfo(cfgId)
+    local sc, sm, pc, pm
+    if ShinyLottery and cfgId then
+        pcall(function()
+            local ec, d = ShinyLottery.getPityInfo(cfgId)
+            if ec == 20000 and type(d) == "table" then sc, sm = d.current, d.pity end
+        end)
+        pcall(function()
+            local ec, d = ShinyLottery.getColorPityInfo(cfgId)
+            if ec == 20000 and type(d) == "table" then pc, pm = d.current, d.pity end
+        end)
+    end
+    return sc, sm, pc, pm
+end
+-- the game's own guarantee rule (BattleCatchPetWindowController): the NEXT catch
+-- is 100% prismatic when pity <= current + 1. That's the "parked" state — stop
+-- catching normals so the guaranteed prismatic stays reserved for a shiny.
+-- NOTE: only base-form species with a shiny variant HAVE pity (getPityInfo
+-- returns ec 20002 for the rest — evolved forms, Mirefish, Flutterby, …).
+local function prismPityState(cfgId)
+    local _, _, pc, pm = pityInfo(cfgId)
+    local hasPity = type(pc) == "number" and type(pm) == "number" and pm > 0
+    return hasPity, hasPity and (pc + 1 >= pm)
+end
+-- throw a specific ball: select it via the game's own ball-cycle, then click catch
+local function throwBall(ballId)
+    local CW = CatchCtrl
+    if not CW or not ballId then return end
+    if typeof(CW.getSelectedBallItemId) == "function" and typeof(CW.triggerSelectNextBall) == "function" then
+        for _ = 1, 12 do
+            if CW.getSelectedBallItemId() == ballId then break end
+            pcall(CW.triggerSelectNextBall)
+            task.wait(0.08)
+        end
+    end
+    if typeof(CW.handleCatchButtonClick) == "function" then pcall(CW.handleCatchButtonClick) end
+end
+-- flip the Auto Catch master toggle off (used by Stop after Shiny: King &
+-- Prismatic balls are 100% catch rate, one throw = guaranteed — you only need
+-- one evomon of that mutation, don't keep spending expensive balls).
+local function stopAutoCatch()
+    F.autoCatch = false
+    if controls.autoCatch and controls.autoCatch.set then pcall(controls.autoCatch.set, false) end
+end
+-- leave the catch (give up) — direct GIVE_UP_CATCH operate, bypasses the UI confirm
+local function giveUpCatch()
+    local mb = getCtrl("MainBattleWindowController")
+    if mb and typeof(mb.applyGiveUpCatch) == "function" then
+        pcall(function() mb.applyGiveUpCatch() end)
+    elseif ReqOperateBattle then
+        pcall(function() ReqOperateBattle:InvokeServer({ actionType = 8 }) end)
+    end
+end
+-- catch-window watcher. Detectable at the catch screen: SHINY + PRISMATIC only
+-- (talent is server-rolled on catch, never shown). The target is sorted into a
+-- category (shinyPrism / shiny / prism / normal) and the ball from that
+-- category's dropdown is thrown, retrying up to maxCatchCount then leaving.
+-- Shiny+Prismatic Farm (F.spFarm) takes priority over Auto Catch: build ball on
+-- normals until the species' prismatic pity parks at max-1, then leave normals
+-- and secure any shiny with the catch ball (= guaranteed shiny+prismatic).
+-- Ball "Skip (leave)" (id 0) -> give up the catch immediately.
+-- Stop after Shiny: a 100%-rate throw (King/Prism ball) on a shiny auto-offs
+-- Auto Catch so expensive balls aren't spent on duplicates.
+-- With Auto Catch OFF but Auto-Farm ON: leave common/prismatic to keep
+-- grinding, PAUSE on shiny so it's never lost.
+-- Retry: each catch has maxCatchCount attempts. We throw, the submit locks during the
+-- throw, and on a miss it unlocks for the next attempt — so throw again while throws <
+-- maxCatchCount. A 1.5s throttle guards the brief pre-lock gap; getRemainingCatchCount is
+-- unreliable here so we count our own throws against catchPetInfo.maxCatchCount.
+task.spawn(function()
+    local lastAct, throws, windowSince = 0, 0, nil
+    while alive() do
+        if (F.autoCatch or F.autoFarm or F.spFarm) and CatchCtrl and typeof(CatchCtrl.getWindow) == "function" then
+            local win
+            pcall(function() win = CatchCtrl.getWindow() end)
+            if type(win) == "table" and type(win.data) == "table" then
+                if not windowSince then windowSince = os.clock() end
+                local cpi = win.data.catchPetInfo
+                local visible = win.MainCanvasGroup == nil or win.MainCanvasGroup.Visible == true
+                local locked = (typeof(CatchCtrl.isCatchSubmitLocked) == "function") and CatchCtrl.isCatchSubmitLocked() or false
+                local maxC = (type(cpi) == "table" and tonumber(cpi.maxCatchCount)) or 2
+                -- only decide once the catch data is loaded AND the window has settled,
+                -- so the shiny/colorful flags are populated (acting too early misread a
+                -- prismatic as common and threw a Common ball at it).
+                local dataReady = type(cpi) == "table"
+                local settled = (os.clock() - windowSince) > 1.0
+                if visible and not locked and dataReady and settled and (os.clock() - lastAct) > 1.5 then
+                    -- robust shiny/prismatic detection (flag, else derive from catch info)
+                    local shiny = win.data.isCatchPetShiny == true
+                    local prism = win.data.isCatchPetColorful == true
+                    if not prism and type(cpi.colorId) == "number" and cpi.colorId > 0
+                       and type(cpi.patternId) == "number" and cpi.patternId > 0 then prism = true end
+                    if not shiny and cpi.configId and CM then
+                        local pc = CM.getConfig(CN.PET, cpi.configId)
+                        if type(pc) == "table" and pc.shinyTypeId == 2 then shiny = true end
+                    end
+                    local category = (shiny and prism and "shinyPrism") or (shiny and "shiny")
+                                     or (prism and "prism") or "normal"
+                    if F.spFarm then
+                        -- SHINY+PRISMATIC FARM (takes priority over Auto Catch):
+                        --   shiny            -> catch ball (on a parked pity = shiny+prismatic)
+                        --   prismatic-only   -> leave (never spend the reserved pity on a non-shiny)
+                        --   normal, parked   -> leave (defeat builds shiny pity, prismatic stays reserved)
+                        --   normal, building -> build ball (catch = prismatic pity +1)
+                        if shiny then
+                            if throws < maxC then
+                                throwBall(spCatchBall); throws = throws + 1; lastAct = os.clock()
+                                if F.stopAfterShiny and (spCatchBall == 2000017 or spCatchBall == 2000018) then
+                                    F.spFarm = false
+                                    if controls.spFarm and controls.spFarm.set then pcall(controls.spFarm.set, false) end
+                                end
+                            end
+                        elseif prism then
+                            giveUpCatch(); lastAct = os.clock()
+                        else
+                            local hasPity, parked = prismPityState(cpi.configId)
+                            if not hasPity or parked then
+                                -- no pity to build (species has none) or parked -> defeat only
+                                giveUpCatch(); lastAct = os.clock()
+                            elseif throws < maxC then
+                                throwBall(spBuildBall); throws = throws + 1; lastAct = os.clock()
+                            else
+                                giveUpCatch(); lastAct = os.clock()
+                            end
+                        end
+                    elseif F.autoCatch then
+                        local ball = catchBall[category] or 0
+                        if ball == 0 then
+                            giveUpCatch(); lastAct = os.clock()               -- Skip (leave)
+                        elseif throws < maxC then
+                            throwBall(ball); throws = throws + 1; lastAct = os.clock()
+                            if shiny and F.stopAfterShiny and (ball == 2000017 or ball == 2000018) then
+                                stopAutoCatch()                               -- 100% ball -> caught, stop spending
+                            end
+                        else
+                            giveUpCatch(); lastAct = os.clock()               -- all attempts missed -> leave
+                        end
+                    elseif F.autoFarm then
+                        -- farm-only: leave common/prismatic so the grind continues; pause on shiny
+                        if not shiny then giveUpCatch(); lastAct = os.clock() end
+                    end
+                end
+            else
+                lastAct, throws, windowSince = 0, 0, nil   -- catch window closed -> arm for the next one
+            end
+        else
+            lastAct, throws, windowSince = 0, 0, nil
+        end
+        task.wait(0.4)
+    end
+end)
+
+-- Reconcile inBattle: if a ResSettleBattle is ever missed, inBattle could stay true
+-- and freeze the farm after one fight. If there's no live battle cache AND no catch
+-- window, we're not in a battle — clear the flag so the farm resumes.
+task.spawn(function()
+    while alive() do
+        if inBattle then
+            local mb = getCtrl("MainBattleWindowController")
+            local bc
+            if mb and typeof(mb.getBattleDataCache) == "function" then pcall(function() bc = mb.getBattleDataCache() end) end
+            if type(bc) ~= "table" then
+                local cwOpen = false
+                if CatchCtrl and typeof(CatchCtrl.getWindow) == "function" then
+                    pcall(function() cwOpen = type(CatchCtrl.getWindow()) == "table" end)
+                end
+                if not cwOpen then inBattle = false end
+            end
+        end
+        task.wait(1)
+    end
+end)
+
+-- ============================================================
+--  AUTO-RELEASE  (free unwanted evomon by talent + mutation filters)
+--  Releases via PetService.reqRemovePets({uuid}) — the game's own
+--  canRemovePets validates first, so team / locked / loved pets are never
+--  freed even if they slip through our own checks. Released one at a time so a
+--  single protected pet can't reject the whole batch.
+-- ============================================================
+local PetService, PetComm
+pcall(function() PetService = require(ReplicatedStorage.Script.Pet.PetService) end)
+pcall(function() PetComm = require(ReplicatedStorage.Script.Pet.PetComm) end)
+local function petIsShiny(p)
+    if PetComm and typeof(PetComm.isShinyPet) == "function" then
+        local ok, r = pcall(PetComm.isShinyPet, p.configId); if ok then return r == true end
+    end
+    return false
+end
+local function petIsPrismatic(p)
+    if p.colorful ~= nil then return true end
+    if PetComm and typeof(PetComm.isPetColorful) == "function" then
+        local ok, r = pcall(PetComm.isPetColorful, p); if ok then return r == true end
+    end
+    return false
+end
+-- keep (do NOT release) if protected, a kept mutation, or talent at/above threshold
+local function shouldRelease(p)
+    if p.locked or p.loved then return false end
+    if F.keepShiny and petIsShiny(p) then return false end
+    if F.keepPrismatic and petIsPrismatic(p) then return false end
+    local rank = TALENT_RANK[p.talentId] or 0
+    if rank >= keepTalentRank() then return false end
+    return true
+end
+local function collectReleasable()
+    local out = {}
+    if not PetService then return out end
+    local ec, data = PetService.getPlayerPetData()
+    if ec ~= 20000 or type(data) ~= "table" or type(data.petList) ~= "table" then return out end
+    for uuid, p in pairs(data.petList) do
+        if type(p) == "table" and shouldRelease(p) then out[#out + 1] = tostring(uuid) end
+    end
+    return out
+end
+local releaseStatus = "idle"
+task.spawn(function()
+    while alive() do
+        if F.autoRelease and PetService then
+            local list = collectReleasable()
+            if #list > 0 then
+                releaseStatus = "releasing " .. #list
+                for _, uuid in ipairs(list) do
+                    if not (F.autoRelease and alive()) then break end
+                    pcall(function() PetService.reqRemovePets({ uuid }) end)
+                    task.wait(0.35)
+                end
+            else
+                releaseStatus = "none to release"
+            end
+        else
+            releaseStatus = "off"
+        end
+        task.wait(5)
+    end
+end)
+
+-- ============================================================
+--  REWARDS  (best-effort claim helpers)
+-- ============================================================
+local GIFT_CODES = { "2K-LIKES", "THXFOR5K", "12klikes", "20000LIKES", "30K-LIKES", "EVO60SPARK" }
+local function R(folder, name)
+    local f = ReplicatedStorage:FindFirstChild("Remote")
+    f = f and f:FindFirstChild(folder)
+    return f and f:FindFirstChild(name)
+end
+local function redeemCodes(extra)
+    local codes = {}
+    for _, c in ipairs(GIFT_CODES) do codes[#codes + 1] = c end
+    if extra and extra ~= "" then codes[#codes + 1] = extra end
+    local rf = R("GiftCode", "ReqRedeemGiftCode")
+    local n = 0
+    if rf then
+        for _, code in ipairs(codes) do
+            local ok = pcall(function() rf:InvokeServer(code) end)
+            if ok then n = n + 1 end
+            task.wait(0.25)
+        end
+    end
+    return n
+end
+local function claimDaily()
+    local rf = R("DailyReward", "ReqClaimDailyReward") or R("DailyReward", "ClaimDailyReward")
+    if rf then return (pcall(function() rf:InvokeServer() end)) end
+    return false
+end
+local function claimMail()
+    local rf = R("Mail", "ReqClaimAllMailReward")
+    if rf then return (pcall(function() rf:InvokeServer() end)) end
+    return false
+end
+local function claimOnline()
+    local rf = R("OnlineReward", "ReqApplyOnlineReward")
+    if rf then return (pcall(function() rf:InvokeServer() end)) end
+    return false
+end
+
+-- ============================================================
+--  PREMIUM UI  (2026 desktop-app redesign)
+--  Matte black #121212 window · #1C1C1F cards · crimson #E53935
+--  accent (active tab / toggle ON / primary buttons only).
+--  Left icon sidebar -> 7 pages (Dashboard/Farm/Catch/Release/
+--  Battle/Rewards/Settings), feature cards on a 2-column grid,
+--  live dashboard tiles instead of the old terminal stats box.
+--  Functionality is untouched — same flags, same controls keys,
+--  so old profiles still load.
+--  Wrapped in one function to stay clear of Luau's 200-local
+--  per-function cap (see the SH hub incident).
+-- ============================================================
+local function __EV_ui()
+    local TweenService = game:GetService("TweenService")
+
+    local COL = {
+        bg       = Color3.fromRGB(18, 18, 18),    -- matte black window
+        side     = Color3.fromRGB(14, 14, 15),    -- sidebar, one step darker
+        panel    = Color3.fromRGB(28, 28, 31),    -- #1C1C1F cards
+        field    = Color3.fromRGB(23, 23, 26),    -- inputs / dropdowns / segment tracks
+        fieldHi  = Color3.fromRGB(40, 40, 45),    -- hover
+        red      = Color3.fromRGB(229, 57, 53),   -- #E53935 crimson
+        redHi    = Color3.fromRGB(240, 82, 77),
+        danger   = Color3.fromRGB(70, 26, 28),
+        text     = Color3.fromRGB(242, 242, 246),
+        sub      = Color3.fromRGB(148, 148, 158),
+        trackOff = Color3.fromRGB(45, 45, 51),
+        white    = Color3.fromRGB(255, 255, 255),
+        sep      = Color3.fromRGB(255, 255, 255), -- used at ~93% transparency
+    }
+
+    -- tiny builders --------------------------------------------------------
+    local function tween(o, t, props)
+        pcall(function()
+            TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+        end)
+    end
+    local function corner(o, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 10); c.Parent = o end
+    local function pad(o, t, b, l, r)
+        local p = Instance.new("UIPadding", o)
+        p.PaddingTop = UDim.new(0, t); p.PaddingBottom = UDim.new(0, b or t)
+        p.PaddingLeft = UDim.new(0, l or t); p.PaddingRight = UDim.new(0, r or l or t)
+    end
+    local function vlist(o, gap)
+        local l = Instance.new("UIListLayout", o)
+        l.Padding = UDim.new(0, gap or 10); l.SortOrder = Enum.SortOrder.LayoutOrder
+        return l
+    end
+    local function hlist(o, gap)
+        local l = vlist(o, gap); l.FillDirection = Enum.FillDirection.Horizontal
+        return l
+    end
+    local function softStroke(o, tr)
+        local s = Instance.new("UIStroke", o)
+        s.Color = COL.sep; s.Transparency = tr or 0.93; s.Thickness = 1
+        return s
+    end
+    local function separator(parent, order)
+        local f = Instance.new("Frame")
+        f.Size = UDim2.new(1, 0, 0, 1); f.BackgroundColor3 = COL.sep; f.BackgroundTransparency = 0.93
+        f.BorderSizePixel = 0; f.LayoutOrder = order or 0; f.Parent = parent
+        return f
+    end
+    local function onHover(o, enterProps, leaveProps)
+        o.MouseEnter:Connect(function() tween(o, 0.15, enterProps) end)
+        o.MouseLeave:Connect(function() tween(o, 0.15, leaveProps) end)
+    end
+
+    -- window ---------------------------------------------------------------
+    local guiParent
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
+        if pg then guiParent = pg end
+    end)
+    if not guiParent then
+        pcall(function()
+            if gethui then
+                local h = gethui()
+                if h and h:IsA("ScreenGui") then h = h.Parent end
+                if h then guiParent = h end
+            end
+        end)
+    end
+    if not guiParent then guiParent = game:GetService("CoreGui") end
+    pcall(function()
+        local prev = guiParent:FindFirstChild(HUB.guiName)
+        if prev then prev:Destroy() end
+    end)
+    local screen = Instance.new("ScreenGui")
+    screen.Name = HUB.guiName
+    screen.ResetOnSpawn = false
+    screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screen.DisplayOrder = 999999999          -- always on top of every other gui
+    pcall(function() screen.OnTopOfCoreBlur = true end)
+    screen.Parent = guiParent
+
+    local DESIGN_W, DESIGN_H = 760, 500
+    local SIDEBAR_W = 156
+    local main = Instance.new("Frame")
+    main.Size = UDim2.fromOffset(DESIGN_W, DESIGN_H)
+    main.Position = UDim2.fromScale(0.5, 0.08)
+    main.AnchorPoint = Vector2.new(0.35, 0)
+    main.BackgroundColor3 = COL.bg
+    main.BorderSizePixel = 0
+    main.Active = true
+    main.ClipsDescendants = true
+    main.Parent = screen
+    corner(main, 14)
+    softStroke(main, 0.88)
+
+    -- responsive scaling ----------------------------------------------------
+    local camera = workspace.CurrentCamera
+    local fab
+    local uiScale = Instance.new("UIScale"); uiScale.Parent = main
+    local function responsiveHeight()
+        local vp = camera and camera.ViewportSize
+        if not vp or vp.Y < 1 then return DESIGN_H end
+        local s = uiScale.Scale > 0 and uiScale.Scale or 1
+        return math.min(DESIGN_H, (vp.Y * 0.92) / s)
+    end
+    local function applyResponsive()
+        local vp = camera and camera.ViewportSize
+        if not vp or vp.X < 1 or vp.Y < 1 then return end
+        local scale = math.clamp(math.min(vp.X / 1500, vp.Y / 820), 0.5, 1.15)
+        uiScale.Scale = scale
+        main.Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())
+        local pxW, pxH = DESIGN_W * scale, responsiveHeight() * scale
+        if main.AbsoluteSize.X > 0 then
+            local ap = main.AbsolutePosition
+            main.AnchorPoint = Vector2.new(0, 0)
+            main.Position = UDim2.fromOffset(
+                math.clamp(ap.X, 0, math.max(0, vp.X - pxW)),
+                math.clamp(ap.Y, 0, math.max(0, vp.Y - pxH)))
+        end
+        if fab then
+            local fs = math.floor(52 * scale)
+            fab.Size = UDim2.fromOffset(fs, fs)
+            if fab.AbsoluteSize.X > 0 then
+                local fp = fab.AbsolutePosition
+                fab.Position = UDim2.fromOffset(
+                    math.clamp(fp.X, 0, math.max(0, vp.X - fs)),
+                    math.clamp(fp.Y, 0, math.max(0, vp.Y - fs)))
+            end
+        end
+    end
+    local function makeDraggable(handle)
+        local dragging, dragStart, startPos
+        handle.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                dragging = true; dragStart = i.Position; startPos = main.Position
+            end
+        end)
+        track(UserInputService.InputChanged:Connect(function(i)
+            if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                local d = i.Position - dragStart
+                main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end))
+        track(UserInputService.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                if dragging then dragging = false; applyResponsive() end
+            end
+        end))
+    end
+
+    -- sidebar ----------------------------------------------------------------
+    local sidebar = Instance.new("Frame")
+    sidebar.Size = UDim2.new(0, SIDEBAR_W, 1, 0)
+    sidebar.BackgroundColor3 = COL.side; sidebar.BorderSizePixel = 0; sidebar.Parent = main
+    corner(sidebar, 14)
+    do -- square off the sidebar's right edge (only left corners should be round)
+        local patch = Instance.new("Frame")
+        patch.Size = UDim2.new(0, 14, 1, 0); patch.Position = UDim2.new(1, -14, 0, 0)
+        patch.BackgroundColor3 = COL.side; patch.BorderSizePixel = 0; patch.Parent = sidebar
+    end
+
+    local logoBlock = Instance.new("Frame")
+    logoBlock.Size = UDim2.new(1, 0, 0, 64); logoBlock.BackgroundTransparency = 1
+    logoBlock.Active = true; logoBlock.Parent = sidebar
+    do
+        local mark = Instance.new("Frame")
+        mark.Size = UDim2.fromOffset(34, 34); mark.Position = UDim2.fromOffset(14, 15)
+        mark.BackgroundColor3 = COL.red; mark.Parent = logoBlock
+        corner(mark, 10)
+        local mt = Instance.new("TextLabel")
+        mt.Size = UDim2.fromScale(1, 1); mt.BackgroundTransparency = 1
+        mt.Font = Enum.Font.GothamBlack; mt.Text = "EV"; mt.TextColor3 = COL.white
+        mt.TextSize = 14; mt.Parent = mark
+        local t1 = Instance.new("TextLabel")
+        t1.Size = UDim2.new(1, -62, 0, 16); t1.Position = UDim2.fromOffset(56, 16)
+        t1.BackgroundTransparency = 1; t1.Font = Enum.Font.GothamBlack
+        t1.Text = "EVOMON"; t1.TextColor3 = COL.text; t1.TextSize = 14
+        t1.TextXAlignment = Enum.TextXAlignment.Left; t1.Parent = logoBlock
+        local t2 = Instance.new("TextLabel")
+        t2.Size = UDim2.new(1, -62, 0, 12); t2.Position = UDim2.fromOffset(56, 33)
+        t2.BackgroundTransparency = 1; t2.Font = Enum.Font.GothamMedium
+        t2.Text = "Hudas Hub"; t2.TextColor3 = COL.sub; t2.TextSize = 10
+        t2.TextXAlignment = Enum.TextXAlignment.Left; t2.Parent = logoBlock
+    end
+    makeDraggable(logoBlock)
+
+    local navHolder = Instance.new("Frame")
+    navHolder.Size = UDim2.new(1, -20, 1, -104); navHolder.Position = UDim2.fromOffset(10, 72)
+    navHolder.BackgroundTransparency = 1; navHolder.Parent = sidebar
+    vlist(navHolder, 4)
+
+    local sideFoot = Instance.new("TextLabel")
+    sideFoot.Size = UDim2.new(1, -20, 0, 16); sideFoot.Position = UDim2.new(0, 14, 1, -24)
+    sideFoot.BackgroundTransparency = 1; sideFoot.Font = Enum.Font.GothamMedium
+    sideFoot.Text = "v2.0  ·  2026"; sideFoot.TextColor3 = COL.sub; sideFoot.TextSize = 10
+    sideFoot.TextXAlignment = Enum.TextXAlignment.Left; sideFoot.Parent = sidebar
+
+    -- content area -------------------------------------------------------------
+    local content = Instance.new("Frame")
+    content.Size = UDim2.new(1, -SIDEBAR_W, 1, 0); content.Position = UDim2.fromOffset(SIDEBAR_W, 0)
+    content.BackgroundTransparency = 1; content.Parent = main
+
+    local header = Instance.new("Frame")
+    header.Size = UDim2.new(1, 0, 0, 58); header.BackgroundTransparency = 1
+    header.Active = true; header.Parent = content
+    local pageTitle = Instance.new("TextLabel")
+    pageTitle.Size = UDim2.new(1, -110, 0, 22); pageTitle.Position = UDim2.fromOffset(24, 11)
+    pageTitle.BackgroundTransparency = 1; pageTitle.Font = Enum.Font.GothamBlack
+    pageTitle.Text = ""; pageTitle.TextColor3 = COL.text; pageTitle.TextSize = 17
+    pageTitle.TextXAlignment = Enum.TextXAlignment.Left; pageTitle.Parent = header
+    local pageSub = Instance.new("TextLabel")
+    pageSub.Size = UDim2.new(1, -110, 0, 13); pageSub.Position = UDim2.fromOffset(24, 34)
+    pageSub.BackgroundTransparency = 1; pageSub.Font = Enum.Font.GothamMedium
+    pageSub.Text = ""; pageSub.TextColor3 = COL.sub; pageSub.TextSize = 11
+    pageSub.TextXAlignment = Enum.TextXAlignment.Left; pageSub.Parent = header
+    do
+        local hb = Instance.new("TextButton")
+        hb.Size = UDim2.fromOffset(30, 30); hb.Position = UDim2.new(1, -42, 0, 14)
+        hb.BackgroundColor3 = COL.field; hb.AutoButtonColor = false
+        hb.Font = Enum.Font.GothamBold; hb.Text = "—"; hb.TextColor3 = COL.sub; hb.TextSize = 12
+        hb.Parent = header
+        corner(hb, 8); softStroke(hb, 0.92)
+        onHover(hb, { BackgroundColor3 = COL.fieldHi, TextColor3 = COL.text },
+                    { BackgroundColor3 = COL.field,  TextColor3 = COL.sub })
+        hb.MouseButton1Click:Connect(function() main.Visible = false end)
+        local hsep = Instance.new("Frame")
+        hsep.Size = UDim2.new(1, -48, 0, 1); hsep.Position = UDim2.new(0, 24, 1, 0)
+        hsep.BackgroundColor3 = COL.sep; hsep.BackgroundTransparency = 0.93
+        hsep.BorderSizePixel = 0; hsep.Parent = header
+    end
+    makeDraggable(header)
+
+    local pagesHolder = Instance.new("Frame")
+    pagesHolder.Size = UDim2.new(1, 0, 1, -58); pagesHolder.Position = UDim2.fromOffset(0, 58)
+    pagesHolder.BackgroundTransparency = 1; pagesHolder.Parent = content
+
+    local PAGES = {}
+    local function makePage(key)
+        local sf = Instance.new("ScrollingFrame")
+        sf.Size = UDim2.new(1, 0, 1, 0); sf.BackgroundTransparency = 1; sf.BorderSizePixel = 0
+        sf.ScrollBarThickness = 3; sf.ScrollBarImageColor3 = Color3.fromRGB(70, 70, 78)
+        sf.CanvasSize = UDim2.new(); sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        sf.Visible = false; sf.Parent = pagesHolder
+        pad(sf, 14, 22, 24, 24)
+        vlist(sf, 12)
+        PAGES[key] = sf
+        return sf
+    end
+
+    -- navigation -----------------------------------------------------------------
+    local NAV = {
+        { key = "dash",     icon = "🏠", label = "Dashboard", desc = "Live overview of the grind" },
+        { key = "farm",     icon = "🌾", label = "Farm",      desc = "Auto-battle farming and targeting" },
+        { key = "catch",    icon = "🎯", label = "Catch",     desc = "Auto catch and ball selection" },
+        { key = "release",  icon = "🕊", label = "Release",   desc = "Free unwanted evomon, keep the good ones" },
+        { key = "battle",   icon = "⚔", label = "Battle",    desc = "Smart battle and playback speed" },
+        { key = "rewards",  icon = "🎁", label = "Rewards",   desc = "Gift codes, daily and mail claims" },
+        { key = "settings", icon = "⚙", label = "Settings",  desc = "Profiles and preferences" },
+    }
+    local navItems = {}
+    local selectPage
+    local function makeNav(def, order)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 0, 36); b.BackgroundColor3 = COL.red
+        b.BackgroundTransparency = 1; b.AutoButtonColor = false; b.Text = ""
+        b.LayoutOrder = order; b.Parent = navHolder
+        corner(b, 8)
+        local accent = Instance.new("Frame")
+        accent.Size = UDim2.fromOffset(3, 16); accent.Position = UDim2.new(0, 0, 0.5, -8)
+        accent.BackgroundColor3 = COL.red; accent.BorderSizePixel = 0
+        accent.Visible = false; accent.Parent = b
+        corner(accent, 2)
+        local ic = Instance.new("TextLabel")
+        ic.Size = UDim2.fromOffset(22, 36); ic.Position = UDim2.fromOffset(10, 0)
+        ic.BackgroundTransparency = 1; ic.Font = Enum.Font.GothamMedium
+        ic.Text = def.icon; ic.TextSize = 13; ic.TextColor3 = COL.sub; ic.Parent = b
+        local lb = Instance.new("TextLabel")
+        lb.Size = UDim2.new(1, -44, 1, 0); lb.Position = UDim2.fromOffset(38, 0)
+        lb.BackgroundTransparency = 1; lb.Font = Enum.Font.GothamMedium
+        lb.Text = def.label; lb.TextColor3 = COL.sub; lb.TextSize = 12
+        lb.TextXAlignment = Enum.TextXAlignment.Left; lb.Parent = b
+        local item = { btn = b, accent = accent, icon = ic, lbl = lb, def = def, active = false }
+        b.MouseEnter:Connect(function()
+            if not item.active then tween(b, 0.15, { BackgroundTransparency = 0.92 }); tween(lb, 0.15, { TextColor3 = COL.text }) end
+        end)
+        b.MouseLeave:Connect(function()
+            if not item.active then tween(b, 0.15, { BackgroundTransparency = 1 }); tween(lb, 0.15, { TextColor3 = COL.sub }) end
+        end)
+        b.MouseButton1Click:Connect(function() selectPage(def.key) end)
+        navItems[def.key] = item
+        makePage(def.key)
+    end
+    selectPage = function(key)
+        for k, it in pairs(navItems) do
+            local active = (k == key)
+            it.active = active
+            it.accent.Visible = active
+            tween(it.btn, 0.15, { BackgroundTransparency = active and 0.85 or 1 })
+            tween(it.lbl, 0.15, { TextColor3 = active and COL.text or COL.sub })
+            tween(it.icon, 0.15, { TextColor3 = active and COL.text or COL.sub })
+            PAGES[k].Visible = active
+            if active then
+                pageTitle.Text = it.def.label
+                pageSub.Text = it.def.desc
+            end
+        end
+    end
+    for i, def in ipairs(NAV) do makeNav(def, i) end
+
+    -- layout helpers ----------------------------------------------------------------
+    -- two balanced columns on a page (the responsive 2-column grid)
+    local function makeRow(page, order)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, 0, 0, 0); row.AutomaticSize = Enum.AutomaticSize.Y
+        row.BackgroundTransparency = 1; row.LayoutOrder = order; row.Parent = page
+        local rl = hlist(row, 12); rl.VerticalAlignment = Enum.VerticalAlignment.Top
+        local function col(o)
+            local c = Instance.new("Frame")
+            c.Size = UDim2.new(0.5, -6, 0, 0); c.AutomaticSize = Enum.AutomaticSize.Y
+            c.BackgroundTransparency = 1; c.LayoutOrder = o; c.Parent = row
+            vlist(c, 12)
+            return c
+        end
+        return col(1), col(2)
+    end
+    -- feature card: icon + title header, soft separator, then a content body
+    local function makeCard(parent, icon, title, order)
+        local card = Instance.new("Frame")
+        card.Size = UDim2.new(1, 0, 0, 0); card.AutomaticSize = Enum.AutomaticSize.Y
+        card.BackgroundColor3 = COL.panel; card.BorderSizePixel = 0
+        card.LayoutOrder = order or 1; card.Parent = parent
+        corner(card, 12)
+        local cs = softStroke(card, 0.93)
+        onHover(card, { }, { })  -- placeholder keeps hover wiring uniform
+        card.MouseEnter:Connect(function() tween(cs, 0.15, { Transparency = 0.85 }) end)
+        card.MouseLeave:Connect(function() tween(cs, 0.15, { Transparency = 0.93 }) end)
+        pad(card, 14, 16, 16, 16)
+        vlist(card, 10)
+        local head = Instance.new("Frame")
+        head.Size = UDim2.new(1, 0, 0, 18); head.BackgroundTransparency = 1
+        head.LayoutOrder = 1; head.Parent = card
+        local ic = Instance.new("TextLabel")
+        ic.Size = UDim2.fromOffset(20, 18); ic.BackgroundTransparency = 1
+        ic.Font = Enum.Font.GothamMedium; ic.Text = icon; ic.TextSize = 13
+        ic.TextColor3 = COL.sub; ic.TextXAlignment = Enum.TextXAlignment.Left; ic.Parent = head
+        local tl = Instance.new("TextLabel")
+        tl.Size = UDim2.new(1, -24, 1, 0); tl.Position = UDim2.fromOffset(24, 0)
+        tl.BackgroundTransparency = 1; tl.Font = Enum.Font.GothamBold
+        tl.Text = title; tl.TextColor3 = COL.text; tl.TextSize = 13
+        tl.TextXAlignment = Enum.TextXAlignment.Left; tl.Parent = head
+        separator(card, 2)
+        local body = Instance.new("Frame")
+        body.Size = UDim2.new(1, 0, 0, 0); body.AutomaticSize = Enum.AutomaticSize.Y
+        body.BackgroundTransparency = 1; body.LayoutOrder = 3; body.Parent = card
+        vlist(body, 8)
+        return body
+    end
+    local function makeNote(parent, text, order)
+        local l = Instance.new("TextLabel")
+        l.Size = UDim2.new(1, 0, 0, 0); l.AutomaticSize = Enum.AutomaticSize.Y
+        l.BackgroundTransparency = 1; l.Font = Enum.Font.Gotham
+        l.Text = text; l.TextColor3 = COL.sub; l.TextSize = 10; l.TextWrapped = true
+        l.TextXAlignment = Enum.TextXAlignment.Left; l.LayoutOrder = order or 99; l.Parent = parent
+        return l
+    end
+
+    -- components ---------------------------------------------------------------------
+    local function makeToggle(parent, label, flagKey, order, desc)
+        local h = desc and 48 or 36
+        local row = Instance.new("TextButton")
+        row.Size = UDim2.new(1, 0, 0, h); row.BackgroundColor3 = COL.fieldHi
+        row.BackgroundTransparency = 1; row.AutoButtonColor = false; row.Text = ""
+        row.LayoutOrder = order or 0; row.Parent = parent
+        corner(row, 8)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -64, 0, 16); lbl.Position = UDim2.fromOffset(8, desc and 8 or (h - 16) / 2)
+        lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.GothamMedium
+        lbl.Text = label; lbl.TextColor3 = COL.text; lbl.TextSize = 13
+        lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.TextTruncate = Enum.TextTruncate.AtEnd; lbl.Parent = row
+        if desc then
+            local dl = Instance.new("TextLabel")
+            dl.Size = UDim2.new(1, -64, 0, 12); dl.Position = UDim2.fromOffset(8, 26)
+            dl.BackgroundTransparency = 1; dl.Font = Enum.Font.Gotham
+            dl.Text = desc; dl.TextColor3 = COL.sub; dl.TextSize = 10
+            dl.TextXAlignment = Enum.TextXAlignment.Left; dl.TextTruncate = Enum.TextTruncate.AtEnd; dl.Parent = row
+        end
+        local sw = Instance.new("Frame")
+        sw.Size = UDim2.fromOffset(40, 20); sw.Position = UDim2.new(1, -48, 0.5, -10)
+        sw.BackgroundColor3 = COL.trackOff; sw.Parent = row
+        corner(sw, 10)
+        local knob = Instance.new("Frame")
+        knob.Size = UDim2.fromOffset(16, 16); knob.Position = UDim2.new(0, 2, 0.5, -8)
+        knob.BackgroundColor3 = Color3.fromRGB(150, 150, 158); knob.Parent = sw
+        corner(knob, 8)
+        local function render(instant)
+            local on = F[flagKey]
+            local target = UDim2.new(0, on and 22 or 2, 0.5, -8)
+            if instant then knob.Position = target else tween(knob, 0.15, { Position = target }) end
+            tween(sw, 0.15, { BackgroundColor3 = on and COL.red or COL.trackOff })
+            tween(knob, 0.15, { BackgroundColor3 = on and COL.white or Color3.fromRGB(150, 150, 158) })
+        end
+        row.MouseButton1Click:Connect(function() F[flagKey] = not F[flagKey]; render() end)
+        onHover(row, { BackgroundTransparency = 0.6 }, { BackgroundTransparency = 1 })
+        controls[flagKey] = { get = function() return F[flagKey] end,
+                              set = function(v) F[flagKey] = v and true or false; render() end }
+        render(true)
+        return row
+    end
+
+    -- exclusive segmented control (replaces the old chips)
+    local function makeSegment(parent, order, stateTbl, items)
+        local seg = Instance.new("Frame")
+        seg.Size = UDim2.new(1, 0, 0, 32); seg.BackgroundColor3 = COL.field
+        seg.LayoutOrder = order or 0; seg.Parent = parent
+        corner(seg, 8); softStroke(seg, 0.93)
+        pad(seg, 3, 3, 3, 3)
+        hlist(seg, 4)
+        local renders = {}
+        local function renderAll() for _, r in ipairs(renders) do r() end end
+        for i, it in ipairs(items) do
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.new(1 / #items, -4, 1, 0); b.AutoButtonColor = false
+            b.Font = Enum.Font.GothamBold; b.Text = it.label; b.TextSize = 11
+            b.LayoutOrder = i; b.Parent = seg
+            corner(b, 6)
+            local function render()
+                local on = stateTbl[it.key]
+                b.BackgroundColor3 = on and COL.red or COL.field
+                b.BackgroundTransparency = on and 0 or 1
+                b.TextColor3 = on and COL.white or COL.sub
+            end
+            b.MouseEnter:Connect(function() if not stateTbl[it.key] then tween(b, 0.12, { TextColor3 = COL.text }) end end)
+            b.MouseLeave:Connect(function() if not stateTbl[it.key] then tween(b, 0.12, { TextColor3 = COL.sub }) end end)
+            b.MouseButton1Click:Connect(function()
+                for k in pairs(stateTbl) do stateTbl[k] = false end
+                stateTbl[it.key] = true
+                renderAll()
+            end)
+            controls[it.ctrl] = { get = function() return stateTbl[it.key] end,
+                                  set = function(v) stateTbl[it.key] = v and true or false; renderAll() end }
+            renders[i] = render
+        end
+        renderAll()
+        return seg
+    end
+
+    -- rounded dropdown; options are (re)built every time it opens
+    local openDDs = {}
+    local function closeAllDD() for _, fn in ipairs(openDDs) do pcall(fn) end end
+    local function makeDropdown(parent, order, opts)
+        local wrap = Instance.new("Frame")
+        wrap.Size = UDim2.new(1, 0, 0, 0); wrap.AutomaticSize = Enum.AutomaticSize.Y
+        wrap.BackgroundTransparency = 1; wrap.LayoutOrder = order or 0; wrap.Parent = parent
+        vlist(wrap, 5)
+        if opts.label then
+            local l = Instance.new("TextLabel")
+            l.Size = UDim2.new(1, 0, 0, 14); l.BackgroundTransparency = 1
+            l.Font = Enum.Font.GothamMedium; l.Text = opts.label; l.TextColor3 = COL.sub
+            l.TextSize = 11; l.TextXAlignment = Enum.TextXAlignment.Left
+            l.TextTruncate = Enum.TextTruncate.AtEnd; l.LayoutOrder = 1; l.Parent = wrap
+        end
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 34); btn.BackgroundColor3 = COL.field
+        btn.AutoButtonColor = false; btn.Text = ""; btn.LayoutOrder = 2; btn.Parent = wrap
+        corner(btn, 8); softStroke(btn, 0.92)
+        onHover(btn, { BackgroundColor3 = COL.fieldHi }, { BackgroundColor3 = COL.field })
+        local cur = Instance.new("TextLabel")
+        cur.Size = UDim2.new(1, -36, 1, 0); cur.Position = UDim2.fromOffset(12, 0)
+        cur.BackgroundTransparency = 1; cur.Font = Enum.Font.GothamMedium
+        cur.Text = ""; cur.TextColor3 = COL.text; cur.TextSize = 12
+        cur.TextXAlignment = Enum.TextXAlignment.Left; cur.TextTruncate = Enum.TextTruncate.AtEnd; cur.Parent = btn
+        local chev = Instance.new("TextLabel")
+        chev.Size = UDim2.fromOffset(24, 34); chev.Position = UDim2.new(1, -28, 0, 0)
+        chev.BackgroundTransparency = 1; chev.Font = Enum.Font.GothamBold
+        chev.Text = "v"; chev.TextColor3 = COL.sub; chev.TextSize = 11; chev.Parent = btn
+        local ddl = Instance.new("Frame")
+        ddl.Size = UDim2.new(1, 0, 0, 0); ddl.AutomaticSize = Enum.AutomaticSize.Y
+        ddl.BackgroundColor3 = Color3.fromRGB(33, 33, 37); ddl.BorderSizePixel = 0
+        ddl.Visible = false; ddl.LayoutOrder = 3; ddl.Parent = wrap
+        corner(ddl, 8); softStroke(ddl, 0.92)
+        pad(ddl, 4, 4, 4, 4)
+        vlist(ddl, 2)
+        local function close() ddl.Visible = false; chev.Text = "v" end
+        table.insert(openDDs, close)
+        local function setText(t, dim)
+            cur.Text = t
+            cur.TextColor3 = dim and COL.sub or COL.text
+        end
+        local function populate()
+            for _, ch in ipairs(ddl:GetChildren()) do
+                if ch:IsA("TextButton") then ch:Destroy() end
+            end
+            for i, o in ipairs(opts.options()) do
+                local ob = Instance.new("TextButton")
+                ob.Size = UDim2.new(1, 0, 0, 28); ob.BackgroundColor3 = COL.fieldHi
+                ob.BackgroundTransparency = 1; ob.AutoButtonColor = false
+                ob.Font = Enum.Font.GothamMedium; ob.Text = "   " .. o.text
+                ob.TextColor3 = (o.text == cur.Text) and COL.red or COL.text
+                ob.TextSize = 12; ob.TextXAlignment = Enum.TextXAlignment.Left
+                ob.TextTruncate = Enum.TextTruncate.AtEnd; ob.LayoutOrder = i; ob.Parent = ddl
+                corner(ob, 6)
+                onHover(ob, { BackgroundTransparency = 0.5 }, { BackgroundTransparency = 1 })
+                ob.MouseButton1Click:Connect(function()
+                    if o.value ~= nil or opts.allowNil then opts.onPick(o.value) end
+                    close()
+                end)
+            end
+        end
+        btn.MouseButton1Click:Connect(function()
+            local was = ddl.Visible
+            closeAllDD()
+            if not was then populate(); ddl.Visible = true; chev.Text = "^" end
+        end)
+        setText(opts.current())
+        return setText
+    end
+
+    local function makeButton(parent, text, style, order, cb)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 0, 34); b.AutoButtonColor = false
+        b.Font = Enum.Font.GothamBold; b.Text = text; b.TextSize = 12
+        b.LayoutOrder = order or 0; b.Parent = parent
+        corner(b, 8)
+        if style == "primary" then
+            b.BackgroundColor3 = COL.red; b.TextColor3 = COL.white
+            onHover(b, { BackgroundColor3 = COL.redHi }, { BackgroundColor3 = COL.red })
+        elseif style == "danger" then
+            b.BackgroundColor3 = COL.danger; b.TextColor3 = Color3.fromRGB(255, 158, 152)
+            softStroke(b, 0.88)
+            onHover(b, { BackgroundColor3 = Color3.fromRGB(90, 33, 36) }, { BackgroundColor3 = COL.danger })
+        else
+            b.BackgroundColor3 = COL.field; b.TextColor3 = COL.text
+            softStroke(b, 0.92)
+            onHover(b, { BackgroundColor3 = COL.fieldHi }, { BackgroundColor3 = COL.field })
+        end
+        b.MouseButton1Click:Connect(function() pcall(cb, b) end)
+        return b
+    end
+    local function busy(b, fn)
+        local t0 = b.Text
+        b.Text = "…"
+        task.spawn(function() pcall(fn); task.wait(0.6); pcall(function() b.Text = t0 end) end)
+    end
+    local function makeInput(parent, placeholder)
+        local tb = Instance.new("TextBox")
+        tb.BackgroundColor3 = COL.field; tb.Text = ""
+        tb.PlaceholderText = placeholder; tb.PlaceholderColor3 = COL.sub
+        tb.Font = Enum.Font.GothamMedium; tb.TextColor3 = COL.text; tb.TextSize = 12
+        tb.TextXAlignment = Enum.TextXAlignment.Left; tb.ClearTextOnFocus = false; tb.Parent = parent
+        corner(tb, 8); softStroke(tb, 0.92)
+        pad(tb, 0, 0, 10, 10)
+        return tb
+    end
+
+    -- ===================== PAGE: DASHBOARD =====================
+    local statBattle, statTarget, statWalk, statWild, statSmart, statRuntime
+    local spPityLbl     -- live per-species pity readout on the Catch page
+    local ballStateLbl  -- live gating status on the Ball Selection card
+    do
+        local page = PAGES.dash
+        local grid = Instance.new("Frame")
+        grid.Size = UDim2.new(1, 0, 0, 0); grid.AutomaticSize = Enum.AutomaticSize.Y
+        grid.BackgroundTransparency = 1; grid.LayoutOrder = 1; grid.Parent = page
+        local gl = Instance.new("UIGridLayout", grid)
+        gl.CellSize = UDim2.new(1 / 3, -6, 0, 78); gl.CellPadding = UDim2.fromOffset(8, 8)
+        gl.SortOrder = Enum.SortOrder.LayoutOrder
+        local function makeStat(icon, label, order)
+            local tile = Instance.new("Frame")
+            tile.BackgroundColor3 = COL.panel; tile.BorderSizePixel = 0
+            tile.LayoutOrder = order; tile.Parent = grid
+            corner(tile, 12); softStroke(tile, 0.93)
+            pad(tile, 12, 12, 14, 14)
+            local top = Instance.new("TextLabel")
+            top.Size = UDim2.new(1, 0, 0, 14); top.BackgroundTransparency = 1
+            top.Font = Enum.Font.GothamBold; top.Text = icon .. "  " .. label
+            top.TextColor3 = COL.sub; top.TextSize = 10
+            top.TextXAlignment = Enum.TextXAlignment.Left; top.TextTruncate = Enum.TextTruncate.AtEnd; top.Parent = tile
+            local val = Instance.new("TextLabel")
+            val.Size = UDim2.new(1, 0, 0, 22); val.Position = UDim2.fromOffset(0, 26)
+            val.BackgroundTransparency = 1; val.Font = Enum.Font.GothamBold
+            val.Text = "—"; val.TextColor3 = COL.text; val.TextSize = 15
+            val.TextXAlignment = Enum.TextXAlignment.Left; val.TextTruncate = Enum.TextTruncate.AtEnd; val.Parent = tile
+            return val
+        end
+        statBattle  = makeStat("⚔", "CURRENT BATTLE", 1)
+        statTarget  = makeStat("🎯", "CURRENT TARGET", 2)
+        statWalk    = makeStat("🚶", "WALK STATUS", 3)
+        statWild    = makeStat("🐾", "WILD COUNT", 4)
+        statSmart   = makeStat("🧠", "SMART BATTLE", 5)
+        statRuntime = makeStat("⏱", "RUNTIME", 6)
+    end
+
+    -- ===================== PAGE: FARM =====================
+    do
+        local colA, colB = makeRow(PAGES.farm, 1)
+        local farmBody = makeCard(colA, "🌾", "Auto Farm", 1)
+        makeToggle(farmBody, "Auto-Battle Farm", "autoFarm", 1, "Walk to the nearest wild, engage, repeat")
+        makeButton(farmBody, "Stop Farm Walk", "danger", 2, function() stopNav() end)
+        makeNote(farmBody, "Chases roaming wilds by walking — no teleports, ever.", 3)
+
+        local tgtBody = makeCard(colB, "🎯", "Farm Target", 1)
+        local setTgt
+        setTgt = makeDropdown(tgtBody, 1, {
+            label = "Engage only this species",
+            options = function()
+                local t = { { text = "Any (nearest)", value = "" } }
+                local seen = {}
+                for _, c in ipairs(gather(TYPE_WILD, 99999, "")) do
+                    if not seen[c.name] then seen[c.name] = true; t[#t + 1] = { text = c.name, value = c.name } end
+                end
+                return t
+            end,
+            current = function() return speciesFilter == "" and "Any (nearest)" or speciesFilter end,
+            onPick = function(v)
+                speciesFilter = v
+                setTgt(speciesFilter == "" and "Any (nearest)" or speciesFilter)
+            end,
+            allowNil = false,
+        })
+        makeNote(tgtBody, "Lists the wild species currently around you. Refreshes every time it opens.", 2)
+        controls["speciesFilter"] = {
+            get = function() return speciesFilter end,
+            set = function(v)
+                speciesFilter = tostring(v or "")
+                setTgt(speciesFilter == "" and "Any (nearest)" or speciesFilter)
+            end,
+        }
+    end
+
+    -- ===================== PAGE: CATCH =====================
+    do
+        local colA, colB = makeRow(PAGES.catch, 1)
+        local acBody = makeCard(colA, "🎯", "Auto Catch", 1)
+        makeToggle(acBody, "Auto Catch", "autoCatch", 1, "Throws the configured ball at the catch screen")
+        makeToggle(acBody, "Stop after Shiny", "stopAfterShiny", 2, "Auto-off after a guaranteed shiny throw")
+        makeNote(acBody, "King and Prismatic balls are 100% catch rate — one throw is a guaranteed catch.", 3)
+
+        local spBody = makeCard(colA, "⭐", "Shiny + Prismatic Farm", 2)
+        makeToggle(spBody, "Farm Shiny + Prismatic", "spFarm", 1, "Overrides Auto Catch at the catch screen")
+        local function ballOnlyOptions()
+            local t = {}
+            for _, b in ipairs(BALL_OPTIONS) do
+                if b.id ~= 0 then t[#t + 1] = { text = b.name, value = b.id } end
+            end
+            return t
+        end
+        local setBuild
+        setBuild = makeDropdown(spBody, 2, {
+            label = "Build Ball (prismatic pity)",
+            options = ballOnlyOptions,
+            current = function() return ballName(spBuildBall) end,
+            onPick = function(id) spBuildBall = id; setBuild(ballName(id)) end,
+        })
+        controls["sp_build"] = { get = function() return spBuildBall end,
+                                 set = function(v) spBuildBall = tonumber(v) or 2000015; setBuild(ballName(spBuildBall)) end }
+        local setCatch
+        setCatch = makeDropdown(spBody, 3, {
+            label = "Catch Ball (secure shiny / combo)",
+            options = ballOnlyOptions,
+            current = function() return ballName(spCatchBall) end,
+            onPick = function(id) spCatchBall = id; setCatch(ballName(id)) end,
+        })
+        controls["sp_catch"] = { get = function() return spCatchBall end,
+                                 set = function(v) spCatchBall = tonumber(v) or 2000017; setCatch(ballName(spCatchBall)) end }
+        spPityLbl = makeNote(spBody, "Pity: —", 4)
+        spPityLbl.TextColor3 = COL.text
+        makeNote(spBody, "How it works: run with Auto-Battle Farm targeting ONE species. Normals are caught with the build ball to raise prismatic pity; at max-1 it PARKS — normals are only defeated (shiny pity keeps building) and the guaranteed prismatic stays reserved. Any shiny gets the catch ball, and on a parked pity that catch is a shiny + prismatic. Pity is per-species.", 5)
+
+        local ballBody = makeCard(colB, "⚾", "Ball Selection", 1)
+        -- live gating status: these dropdowns only fire under the Auto Catch
+        -- master toggle; Shiny+Prismatic Farm has its OWN balls and overrides.
+        ballStateLbl = makeNote(ballBody, "", 0)
+        makeNote(ballBody, "\"Skip (leave)\" gives the catch up so the farm keeps grinding.", 1)
+        local specs = {
+            { key = "shiny",      label = "Ball for Shiny" },
+            { key = "prism",      label = "Ball for Prismatic  ·  Skip saves pity" },
+            { key = "shinyPrism", label = "Ball for Shiny + Prismatic" },
+            { key = "normal",     label = "Ball for Normal  ·  Skip leaves" },
+        }
+        for i, spec in ipairs(specs) do
+            local setText
+            setText = makeDropdown(ballBody, i + 1, {
+                label = spec.label,
+                options = function()
+                    local t = {}
+                    for _, b in ipairs(BALL_OPTIONS) do t[#t + 1] = { text = b.name, value = b.id } end
+                    return t
+                end,
+                current = function() return ballName(catchBall[spec.key]) end,
+                onPick = function(id)
+                    catchBall[spec.key] = id
+                    setText(ballName(id), id == 0)
+                end,
+                allowNil = false,
+            })
+            setText(ballName(catchBall[spec.key]), catchBall[spec.key] == 0)
+            controls["ball_" .. spec.key] = {
+                get = function() return catchBall[spec.key] end,
+                set = function(v)
+                    local id = tonumber(v) or 0
+                    catchBall[spec.key] = id
+                    setText(ballName(id), id == 0)
+                end,
+            }
+        end
+    end
+
+    -- ===================== PAGE: RELEASE =====================
+    do
+        local colA, colB = makeRow(PAGES.release, 1)
+        local relBody = makeCard(colA, "🕊", "Auto Release", 1)
+        makeToggle(relBody, "Auto-Release", "autoRelease", 1, "Free pets below your keep filters, every 5s")
+        makeNote(relBody, "Locked, loved and team pets are never released — the game validates every removal.", 2)
+
+        local keepBody = makeCard(colB, "🛡", "Keep Filters", 1)
+        makeToggle(keepBody, "Keep Shiny", "keepShiny", 1)
+        makeToggle(keepBody, "Keep Prismatic", "keepPrismatic", 2)
+        local kl = Instance.new("TextLabel")
+        kl.Size = UDim2.new(1, 0, 0, 14); kl.BackgroundTransparency = 1
+        kl.Font = Enum.Font.GothamMedium; kl.Text = "Keep talent at or above"
+        kl.TextColor3 = COL.sub; kl.TextSize = 11; kl.TextXAlignment = Enum.TextXAlignment.Left
+        kl.LayoutOrder = 3; kl.Parent = keepBody
+        makeSegment(keepBody, 4, keepTalent, {
+            { key = 3, label = "A+",  ctrl = "kt_a" },
+            { key = 4, label = "S+",  ctrl = "kt_s" },
+            { key = 5, label = "SSS", ctrl = "kt_sss" },
+        })
+    end
+
+    -- ===================== PAGE: BATTLE =====================
+    do
+        local colA, colB = makeRow(PAGES.battle, 1)
+        local sbBody = makeCard(colA, "🧠", "Smart Battle", 1)
+        makeToggle(sbBody, "Smart Battle (Type)", "smartBattle", 1, "Element-aware move picker, energy-safe")
+        makeNote(sbBody, "Picks the strongest super-effective move each turn and never fires an ultimate it can't afford.", 2)
+
+        local fbBody = makeCard(colB, "⚡", "Fast Battle", 1)
+        makeToggle(fbBody, "Fast Battle (free)", "fastBattle", 1, "Client-side playback speed, only you see it")
+        local sl = Instance.new("TextLabel")
+        sl.Size = UDim2.new(1, 0, 0, 14); sl.BackgroundTransparency = 1
+        sl.Font = Enum.Font.GothamMedium; sl.Text = "Playback speed"
+        sl.TextColor3 = COL.sub; sl.TextSize = 11; sl.TextXAlignment = Enum.TextXAlignment.Left
+        sl.LayoutOrder = 2; sl.Parent = fbBody
+        makeSegment(fbBody, 3, battleSpeedMul, {
+            { key = 2,  label = "2X",  ctrl = "spd2" },
+            { key = 3,  label = "3X",  ctrl = "spd3" },
+            { key = 4,  label = "4X",  ctrl = "spd4" },
+            { key = 6,  label = "6X",  ctrl = "spd6" },
+            { key = 8,  label = "8X",  ctrl = "spd8" },
+            { key = 10, label = "10X", ctrl = "spd10" },
+        })
+    end
+
+    -- ===================== PAGE: REWARDS =====================
+    do
+        local colA, colB = makeRow(PAGES.rewards, 1)
+        local gcBody = makeCard(colA, "🎁", "Gift Codes", 1)
+        makeButton(gcBody, "Redeem Known Codes", "primary", 1, function(b) busy(b, function() redeemCodes("") end) end)
+        local crow = Instance.new("Frame")
+        crow.Size = UDim2.new(1, 0, 0, 34); crow.BackgroundTransparency = 1
+        crow.LayoutOrder = 2; crow.Parent = gcBody
+        local codeBox = makeInput(crow, "custom gift code…")
+        codeBox.Size = UDim2.new(1, -86, 1, 0)
+        local cgo = Instance.new("TextButton")
+        cgo.Size = UDim2.new(0, 80, 1, 0); cgo.Position = UDim2.new(1, -80, 0, 0)
+        cgo.BackgroundColor3 = COL.red; cgo.AutoButtonColor = false
+        cgo.Font = Enum.Font.GothamBold; cgo.Text = "Redeem"; cgo.TextColor3 = COL.white
+        cgo.TextSize = 12; cgo.Parent = crow
+        corner(cgo, 8)
+        onHover(cgo, { BackgroundColor3 = COL.redHi }, { BackgroundColor3 = COL.red })
+        cgo.MouseButton1Click:Connect(function()
+            local code = (codeBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if code ~= "" then task.spawn(function() redeemCodes(code) end); codeBox.Text = "" end
+        end)
+        makeNote(gcBody, "Known codes: " .. table.concat(GIFT_CODES, ", "), 3)
+
+        local clBody = makeCard(colB, "📬", "Claims", 1)
+        makeButton(clBody, "Claim Daily + Online", "ghost", 1, function(b) busy(b, function() claimDaily(); claimOnline() end) end)
+        makeButton(clBody, "Claim All Mail", "ghost", 2, function(b) busy(b, function() claimMail() end) end)
+        makeNote(clBody, "Best-effort claims — anything already claimed is simply skipped by the server.", 3)
+    end
+
+    -- ===================== PAGE: SETTINGS =====================
+    do
+        local colA, colB = makeRow(PAGES.settings, 1)
+        local profBody = makeCard(colA, "💾", "Profiles", 1)
+        local hasFiles = (writefile and readfile and listfiles and isfolder and makefolder and delfile) and true or false
+        local function ensureFolder() if hasFiles and not isfolder(HUB.profDir) then pcall(makefolder, HUB.profDir) end end
+        local function ppath(n) return HUB.profDir .. "/" .. n .. ".json" end
+        local function listProfiles()
+            local out = {}
+            if not hasFiles or not isfolder(HUB.profDir) then return out end
+            local ok, files = pcall(listfiles, HUB.profDir)
+            if ok then
+                for _, f in ipairs(files) do
+                    local nm = f:match("([^/\\]+)%.json$")
+                    if nm then table.insert(out, nm) end
+                end
+            end
+            return out
+        end
+        local function saveProfile(n)
+            if not hasFiles or n == "" then return false end
+            ensureFolder()
+            local data = {}
+            for k, c in pairs(controls) do
+                local ok, v = pcall(c.get)
+                if ok then data[k] = v end
+            end
+            return (pcall(function() writefile(ppath(n), HttpService:JSONEncode(data)) end))
+        end
+        local function applyProfile(n)
+            if not hasFiles then return false end
+            local ok, raw = pcall(readfile, ppath(n)); if not ok then return false end
+            local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
+            if not ok2 or type(data) ~= "table" then return false end
+            for k, v in pairs(data) do if controls[k] then pcall(controls[k].set, v) end end
+            return true
+        end
+        if not hasFiles then
+            makeNote(profBody, "This executor has no file API — profiles are unavailable.", 1)
+        else
+            local irow = Instance.new("Frame")
+            irow.Size = UDim2.new(1, 0, 0, 34); irow.BackgroundTransparency = 1
+            irow.LayoutOrder = 1; irow.Parent = profBody
+            local nameBox = makeInput(irow, "new profile name…")
+            nameBox.Size = UDim2.new(1, -86, 1, 0)
+            local createBtn = Instance.new("TextButton")
+            createBtn.Size = UDim2.new(0, 80, 1, 0); createBtn.Position = UDim2.new(1, -80, 0, 0)
+            createBtn.BackgroundColor3 = COL.red; createBtn.AutoButtonColor = false
+            createBtn.Font = Enum.Font.GothamBold; createBtn.Text = "Create"
+            createBtn.TextColor3 = COL.white; createBtn.TextSize = 12; createBtn.Parent = irow
+            corner(createBtn, 8)
+            onHover(createBtn, { BackgroundColor3 = COL.redHi }, { BackgroundColor3 = COL.red })
+
+            local selected = nil
+            local actionRow
+            local setProf
+            setProf = makeDropdown(profBody, 2, {
+                label = "Saved profiles",
+                options = function()
+                    local t = {}
+                    for _, nm in ipairs(listProfiles()) do t[#t + 1] = { text = nm, value = nm } end
+                    if #t == 0 then t[1] = { text = "(no profiles yet)", value = nil } end
+                    return t
+                end,
+                current = function() return selected or "Select profile…" end,
+                onPick = function(v)
+                    if v then
+                        selected = v
+                        setProf(v)
+                        actionRow.Visible = true
+                    end
+                end,
+                allowNil = false,
+            })
+            setProf("Select profile…", true)
+
+            actionRow = Instance.new("Frame")
+            actionRow.Size = UDim2.new(1, 0, 0, 32); actionRow.BackgroundTransparency = 1
+            actionRow.Visible = false; actionRow.LayoutOrder = 3; actionRow.Parent = profBody
+            hlist(actionRow, 6)
+            local function mkAction(txt, style, ord, cb)
+                local b = Instance.new("TextButton")
+                b.Size = UDim2.new(1 / 3, -4, 1, 0); b.AutoButtonColor = false
+                b.Font = Enum.Font.GothamBold; b.Text = txt; b.TextSize = 11
+                b.LayoutOrder = ord; b.Parent = actionRow
+                corner(b, 8)
+                if style == "primary" then
+                    b.BackgroundColor3 = COL.red; b.TextColor3 = COL.white
+                    onHover(b, { BackgroundColor3 = COL.redHi }, { BackgroundColor3 = COL.red })
+                elseif style == "danger" then
+                    b.BackgroundColor3 = COL.danger; b.TextColor3 = Color3.fromRGB(255, 158, 152)
+                    onHover(b, { BackgroundColor3 = Color3.fromRGB(90, 33, 36) }, { BackgroundColor3 = COL.danger })
+                else
+                    b.BackgroundColor3 = COL.field; b.TextColor3 = COL.text
+                    softStroke(b, 0.92)
+                    onHover(b, { BackgroundColor3 = COL.fieldHi }, { BackgroundColor3 = COL.field })
+                end
+                b.MouseButton1Click:Connect(function() pcall(cb) end)
+            end
+            mkAction("Load", "primary", 1, function() if selected then applyProfile(selected) end end)
+            mkAction("Overwrite", "ghost", 2, function() if selected then saveProfile(selected) end end)
+            mkAction("Delete", "danger", 3, function()
+                if selected then
+                    pcall(delfile, ppath(selected))
+                    selected = nil
+                    setProf("Select profile…", true)
+                    actionRow.Visible = false
+                end
+            end)
+            createBtn.MouseButton1Click:Connect(function()
+                local nm = (nameBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                if nm == "" then return end
+                if saveProfile(nm) then
+                    nameBox.Text = ""
+                    selected = nm
+                    setProf(nm)
+                    actionRow.Visible = true
+                end
+            end)
+        end
+
+        local genBody = makeCard(colB, "⚙", "General", 1)
+        makeToggle(genBody, "Anti-AFK", "antiAfk", 1, "Blocks the 20-minute idle kick")
+        makeNote(genBody, "The window stays on top of the game UI. Drag the sidebar header or the page title to move it. Click the floating EV button to hide or show the hub.", 2)
+    end
+
+    -- dashboard updater (replaces the old terminal stats box)
+    local startedAt = os.time()
+    task.spawn(function()
+        while alive() do
+            pcall(function()
+                local list = gather(TYPE_WILD, activeMaxDist(), speciesFilter)
+                local near = list[1]
+                statBattle.Text = inBattle and "In Battle" or "Free"
+                statBattle.TextColor3 = inBattle and COL.red or COL.text
+                if near then
+                    statTarget.Text = string.format("%s · %dm", near.name, math.floor(near.dist))
+                elseif speciesFilter ~= "" then
+                    statTarget.Text = speciesFilter .. " (none)"
+                else
+                    statTarget.Text = "None in range"
+                end
+                statWalk.Text = navStatus
+                statWild.Text = string.format("%d  ·  range %d", #list, activeMaxDist())
+                statSmart.Text = F.smartBattle and "Active" or "Off"
+                statSmart.TextColor3 = F.smartBattle and COL.red or COL.text
+                local el = os.time() - startedAt
+                statRuntime.Text = string.format("%02d:%02d:%02d",
+                    math.floor(el / 3600), math.floor(el % 3600 / 60), el % 60)
+                -- Ball Selection gating status (dropdowns only apply under Auto Catch)
+                if ballStateLbl then
+                    if F.spFarm then
+                        ballStateLbl.Text = "● Overridden — Shiny+Prismatic Farm is ON and uses its own balls; these do nothing while it runs."
+                        ballStateLbl.TextColor3 = COL.red
+                    elseif F.autoCatch then
+                        ballStateLbl.Text = "● Active — thrown at the catch screen per category."
+                        ballStateLbl.TextColor3 = COL.text
+                    else
+                        ballStateLbl.Text = "○ Auto Catch is OFF — these balls are not used until you turn it on."
+                        ballStateLbl.TextColor3 = COL.sub
+                    end
+                end
+                -- live per-species pity for the current farm target
+                if spPityLbl then
+                    if near and near.cfgId then
+                        local sc, sm, pc, pm = pityInfo(near.cfgId)
+                        if type(pm) == "number" and pm > 0 then
+                            local parked = (pc + 1 >= pm)
+                            spPityLbl.Text = string.format("%s pity — Shiny %s/%s  ·  Prismatic %s/%s%s",
+                                near.name, tostring(sc or "?"), tostring(sm or "?"),
+                                tostring(pc), tostring(pm),
+                                parked and "   ● PARKED — next catch = prismatic" or "")
+                            spPityLbl.TextColor3 = parked and COL.red or COL.text
+                        else
+                            spPityLbl.Text = near.name .. " — no shiny/prismatic pity (evolved or no shiny variant); target a base species"
+                            spPityLbl.TextColor3 = COL.sub
+                        end
+                    else
+                        spPityLbl.Text = "Pity: no wild in range"
+                        spPityLbl.TextColor3 = COL.sub
+                    end
+                end
+            end)
+            task.wait(0.5)
+        end
+    end)
+
+    -- floating circular logo button --------------------------------------------
+    local function resolveLogo()
+        if HUB.logoAsset ~= "" then return HUB.logoAsset end
+        local ok, id = pcall(function()
+            if getcustomasset and isfile and isfile(HUB.logoFile) then return getcustomasset(HUB.logoFile) end
+        end)
+        if ok and type(id) == "string" then return id end
+        return nil
+    end
+    fab = Instance.new("TextButton")
+    fab.Name = "Toggle"; fab.Size = UDim2.fromOffset(52, 52); fab.Position = UDim2.fromScale(0.03, 0.42)
+    fab.BackgroundColor3 = COL.bg; fab.AutoButtonColor = false; fab.Text = ""
+    fab.Active = true; fab.ZIndex = 20; fab.Parent = screen
+    corner(fab, 26)
+    do local ring = Instance.new("UIStroke", fab); ring.Color = COL.red; ring.Thickness = 2; ring.Transparency = 0.1 end
+    do
+        local logoId = resolveLogo()
+        if logoId then
+            local logo = Instance.new("ImageLabel")
+            logo.Size = UDim2.fromScale(0.84, 0.84); logo.Position = UDim2.fromScale(0.08, 0.08)
+            logo.BackgroundTransparency = 1; logo.Image = logoId; logo.ZIndex = 21; logo.Parent = fab
+            corner(logo, 24)
+        else
+            local t = Instance.new("TextLabel")
+            t.Size = UDim2.fromScale(1, 1); t.BackgroundTransparency = 1; t.Font = Enum.Font.GothamBlack
+            t.Text = "EV"; t.TextColor3 = COL.red; t.TextSize = 17; t.ZIndex = 21; t.Parent = fab
+        end
+    end
+    do
+        local dragging, moved, startInput, startPos
+        fab.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                dragging = true; moved = false; startInput = i.Position; startPos = fab.Position
+            end
+        end)
+        track(UserInputService.InputChanged:Connect(function(i)
+            if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                local d = i.Position - startInput
+                if math.abs(d.X) + math.abs(d.Y) > 6 then moved = true end
+                fab.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
+        end))
+        track(UserInputService.InputEnded:Connect(function(i)
+            if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+                dragging = false
+                if not moved then main.Visible = not main.Visible end
+                applyResponsive()
+            end
+        end))
+    end
+
+    if camera then track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyResponsive)) end
+    task.defer(applyResponsive)
+    applyResponsive()
+    selectPage("dash")
+end
+__EV_ui()
+
+print("[" .. HUB.name .. "] premium UI loaded — Dashboard / Farm / Catch / Release / Battle / Rewards / Settings.")

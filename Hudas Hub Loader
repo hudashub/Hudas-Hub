@@ -183,6 +183,8 @@ end
 local routes = {
     [98800969324557] = { "Storage Hunters: Open World", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Storage%20Hunters" },
     [92605157087535] = { "Crab Tycoon", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Crab%20Tycoon" },
+    [137233438285284] = { "Chicken Farm", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Chicken%20Farm" },
+    [134381727982611] = { "Evomon", "https://raw.githubusercontent.com/hudashub/Hudas-Hub/refs/heads/main/Evomon" },
 }
 
 -- Check game routing matching both PlaceId or broader GameId (Universe ID)

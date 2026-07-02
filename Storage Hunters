@@ -2952,9 +2952,11 @@ local function applyResponsive()
         local fs = math.floor(52 * uiScale.Scale)
         fab.Size = UDim2.fromOffset(fs, fs)
         local fp = fab.AbsolutePosition
-        fab.Position = UDim2.fromOffset(
-            math.clamp(fp.X, 0, math.max(0, vp.X - fs)),
-            math.clamp(fp.Y, 0, math.max(0, vp.Y - fs)) + fs * 0.5)
+        local cx = math.clamp(fp.X, 0, math.max(0, vp.X - fs))
+        local cy = math.clamp(fp.Y, 0, math.max(0, vp.Y - fs))
+        if math.abs(cx - fp.X) > 0.5 or math.abs(cy - fp.Y) > 0.5 then
+            fab.Position = UDim2.fromOffset(cx, cy + fs * 0.5)
+        end
     end
 end
 
@@ -3097,17 +3099,17 @@ pageSub.TextXAlignment = Enum.TextXAlignment.Left
 
 local minimizeBtn = Instance.new("TextButton", ContentHeader)
 minimizeBtn.Name = "Minimize"
-minimizeBtn.Size = UDim2.fromOffset(24, 24)
-minimizeBtn.Position = UDim2.new(1, -68, 0, 18)
-minimizeBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+minimizeBtn.Size = UDim2.fromOffset(28, 28)
+minimizeBtn.Position = UDim2.new(1, -78, 0, 16)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(22, 22, 26)
 minimizeBtn.BorderSizePixel = 0
 minimizeBtn.Font = Enum.Font.GothamBold
 minimizeBtn.Text = "-"
-minimizeBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
-minimizeBtn.TextSize = 14
+minimizeBtn.TextColor3 = Color3.fromRGB(210, 210, 220)
+minimizeBtn.TextSize = 18
 Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 6)
 local min_stroke = Instance.new("UIStroke", minimizeBtn)
-min_stroke.Color = Color3.fromRGB(35, 35, 40)
+min_stroke.Color = Color3.fromRGB(50, 50, 60)
 min_stroke.Thickness = 1
 minimizeBtn.MouseButton1Click:Connect(function()
     MF.Visible = false
@@ -3115,17 +3117,17 @@ end)
 
 local closeBtn = Instance.new("TextButton", ContentHeader)
 closeBtn.Name = "Close"
-closeBtn.Size = UDim2.fromOffset(24, 24)
-closeBtn.Position = UDim2.new(1, -38, 0, 18)
-closeBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+closeBtn.Size = UDim2.fromOffset(28, 28)
+closeBtn.Position = UDim2.new(1, -44, 0, 16)
+closeBtn.BackgroundColor3 = Color3.fromRGB(28, 14, 15)
 closeBtn.BorderSizePixel = 0
 closeBtn.Font = Enum.Font.GothamBold
-closeBtn.Text = "x"
-closeBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
-closeBtn.TextSize = 14
+closeBtn.Text = "×"
+closeBtn.TextColor3 = Color3.fromRGB(255, 90, 80)
+closeBtn.TextSize = 18
 Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
 local cls_stroke = Instance.new("UIStroke", closeBtn)
-cls_stroke.Color = Color3.fromRGB(35, 35, 40)
+cls_stroke.Color = Color3.fromRGB(100, 30, 32)
 cls_stroke.Thickness = 1
 closeBtn.MouseButton1Click:Connect(function()
     if _G.__SH_AF_CLEANUP then

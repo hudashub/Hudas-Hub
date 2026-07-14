@@ -1192,21 +1192,27 @@ local function doAutoFarmStep()
 
         -- Persistent target handling: keep current mob until it dies
         if not currentTargetMob or not currentTargetMob:FindFirstChild("Humanoid") or currentTargetMob.Humanoid.Health <= 0 then
-            -- Find a new target mob
+            -- Find a new target mob — only search in NPC-specific folders, NOT all of Workspace
             local targetName = activeQ.NPCName
-            local npcZones = WS:FindFirstChild("NPC Zones")
-            local mobFolders = {WS, WS:FindFirstChild("Npc_Workspace"), npcZones}
+            local npcZones     = WS:FindFirstChild("NPC Zones")
+            local npcWorkspace = WS:FindFirstChild("Npc_Workspace")
+            -- Exclude the QuestGivers subfolder so we never target quest NPCs
+            local questGiversFolder = npcWorkspace and npcWorkspace:FindFirstChild("QuestGivers")
+            local mobFolders = {npcZones, npcWorkspace}
             local cleanTarget = targetName:lower():gsub("s$", ""):gsub("%s+", "")
             local bestDist = math.huge
             local bestMob = nil
             for _, f in ipairs(mobFolders) do
                 if f then
                     for _, m in ipairs(f:GetDescendants()) do
+                        -- Skip anything inside QuestGivers
+                        if questGiversFolder and m:IsDescendantOf(questGiversFolder) then continue end
                         if m:IsA("Model") and m:FindFirstChild("HumanoidRootPart") then
                             local mName = m.Name:lower():gsub("%s+", "")
                             if string.find(mName, cleanTarget) or string.find(cleanTarget, mName) then
                                 local hum = m:FindFirstChild("Humanoid")
-                                if hum and hum.Health > 0 then
+                                -- Quest givers have MaxHealth == 0; real mobs have MaxHealth > 0
+                                if hum and hum.Health > 0 and hum.MaxHealth > 0 then
                                     local d = (root.Position - m.HumanoidRootPart.Position).Magnitude
                                     if d < bestDist then
                                         bestDist = d
@@ -1226,66 +1232,42 @@ local function doAutoFarmStep()
             local targetPos = mobRoot.Position
             local ourPos
             
-            -- ── Smooth attachment via BodyPosition (no CFrame = no camera jitter) ──
-            local wantedPos
-            if State.FarmPosition == "Above" then
-                wantedPos = targetPos + Vector3.new(0, State.FarmDistance, 0)
-            elseif State.FarmPosition == "Under" then
-                wantedPos = targetPos + Vector3.new(0, -State.FarmDistance, 0)
-            else -- Behind
-                wantedPos = (mobRoot.CFrame * CFrame.new(0, 0, State.FarmDistance)).Position
-            end
-
-            -- Create/reuse BodyPosition on the player's root part
-            if not _bodyPos or not _bodyPos.Parent then
-                clearBodyPos()
-                _bodyPos = Instance.new("BodyPosition")
-                _bodyPos.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-                _bodyPos.P         = 5000   -- spring stiffness
-                _bodyPos.D         = 800    -- damping (prevents oscillation)
-                _bodyPos.Position  = wantedPos
-                _bodyPos.Parent    = root
-            else
-                -- Just update target position — physics does the rest smoothly
-                _bodyPos.Position = wantedPos
-            end
-
-            -- Also face toward the mob
-            root.CFrame = CFrame.new(root.Position, Vector3.new(targetPos.X, root.Position.Y, targetPos.Z))
+            -- ── Position is handled by RenderStepped (instant, zero delay) ──
+            -- Just fire the attack here on the 10Hz tick
             if tick() - lastAttack > 0.15 then
                 lastAttack = tick()
                 -- Equip weapon if none is held
                 local char2 = player.Character
                 local heldTool = char2 and char2:FindFirstChildWhichIsA("Tool")
                 if not heldTool then
-                    local bp = player:FindFirstChild("Backpack")
+                    local bp2 = player:FindFirstChild("Backpack")
                     local hum2 = char2 and char2:FindFirstChild("Humanoid")
-                    if bp and hum2 then
-                        local anyTool = bp:FindFirstChildWhichIsA("Tool")
+                    if bp2 and hum2 then
+                        local anyTool = bp2:FindFirstChildWhichIsA("Tool")
                         if anyTool then hum2:EquipTool(anyTool) end
                     end
                 end
-                -- Click at the mob's projected screen position to attack
+                -- Warp mouse cursor TO the mob's screen position so the
+                -- game's hit detection always targets the mob, not wherever
+                -- the player was last looking.
                 local camera = workspace.CurrentCamera
                 if camera then
                     local screenPos, onScreen = camera:WorldToScreenPoint(targetPos)
-                    if onScreen then
-                        VR:ClickButton1(Vector2.new(screenPos.X, screenPos.Y))
-                    else
-                        VR:ClickButton1(Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2))
-                    end
+                    local sx = onScreen and screenPos.X or camera.ViewportSize.X / 2
+                    local sy = onScreen and screenPos.Y or camera.ViewportSize.Y / 2
+                    local VIM2 = game:GetService("VirtualInputManager")
+                    VIM2:SendMouseMoveEvent(sx, sy, game) -- lock cursor on mob
+                    VR:ClickButton1(Vector2.new(sx, sy))  -- click exactly there
                 else
                     VR:ClickButton1(Vector2.new(0, 0))
                 end
             end
             -- (health‑bar heartbeat effect removed)
         else
-            -- No mob found — remove the attachment so player moves freely
-            clearBodyPos()
+            -- No mob — let player move freely
             root.Anchored = false
         end
     else
-        clearBodyPos()
         root.Anchored = false
     end
 end
@@ -1306,8 +1288,33 @@ local function doCombatFeatures()
         end
     end
 
-    -- Auto Attack
-    if State.AutoAttack and not State.AutoFarmLevel then
+    -- Find nearest alive mob to gate attacks/skills on proximity
+    local nearestMobDist = math.huge
+    local charRoot = char:FindFirstChild("HumanoidRootPart")
+    if charRoot then
+        local checkFolders = {WS:FindFirstChild("NPC Zones"), WS:FindFirstChild("Npc_Workspace")}
+        local questGiversF = WS:FindFirstChild("Npc_Workspace") and WS.Npc_Workspace:FindFirstChild("QuestGivers")
+        for _, f in ipairs(checkFolders) do
+            if f then
+                for _, m in ipairs(f:GetDescendants()) do
+                    if questGiversF and m:IsDescendantOf(questGiversF) then continue end
+                    if m:IsA("Model") and m ~= char then
+                        local hum = m:FindFirstChild("Humanoid")
+                        local mRoot = m:FindFirstChild("HumanoidRootPart")
+                        if hum and mRoot and hum.Health > 0 and hum.MaxHealth > 0 then
+                            local d = (charRoot.Position - mRoot.Position).Magnitude
+                            if d < nearestMobDist then nearestMobDist = d end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local MOB_ATTACK_RANGE = 30 -- studs — only attack/use skills within this range
+    local mobNearby = nearestMobDist <= MOB_ATTACK_RANGE
+
+    -- Auto Attack (only when mob is nearby)
+    if State.AutoAttack and not State.AutoFarmLevel and mobNearby then
         -- Auto Farm already handles clicking, so we only click here if AutoFarm is off
         VR:ClickButton1(Vector2.new(0,0))
     end
@@ -1336,8 +1343,8 @@ local function doCombatFeatures()
             end
         end
 
-    -- Auto Skills: fire only selected keys, let the game handle cooldowns
-    if State.AutoSkills and #State.SkillKeys > 0 then
+    -- Auto Skills: fire only selected keys when a mob is nearby
+    if State.AutoSkills and #State.SkillKeys > 0 and mobNearby then
         local VIM = game:GetService("VirtualInputManager")
         local keyMap = {
             Z="Z", X="X", C="C", V="V", Q="Q", E="E",
@@ -1412,13 +1419,40 @@ local function doCombatFeatures()
     end
 end
 
--- Run farm loop at 10Hz — slow enough that camera barely moves, killing GUI flicker
+-- Run farm loop at 10Hz for quest logic, combat, etc.
 trackThread(task.spawn(function()
     while true do
         pcall(doAutoFarmStep)
         pcall(doCombatFeatures)
-        task.wait(0.1) -- 10Hz
+        task.wait(0.1)
     end
+end))
+
+-- ── RenderStepped: instant zero-delay mob attachment every frame ────
+-- Runs client-side before each render. Sets CFrame directly so the
+-- character moves WITH the mob instantly, no spring/delay.
+track(RunService.RenderStepped:Connect(function()
+    if not State.AutoFarmLevel then return end
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or not currentTargetMob then return end
+    local mobHum = currentTargetMob:FindFirstChild("Humanoid")
+    if not mobHum or mobHum.Health <= 0 then return end
+    local mobRoot = currentTargetMob:FindFirstChild("HumanoidRootPart")
+    if not mobRoot then return end
+
+    local targetPos = mobRoot.Position
+    local wantedPos
+    if State.FarmPosition == "Above" then
+        wantedPos = targetPos + Vector3.new(0, State.FarmDistance, 0)
+    elseif State.FarmPosition == "Under" then
+        wantedPos = targetPos + Vector3.new(0, -State.FarmDistance, 0)
+    else -- Behind: offset in the mob's own local Z axis
+        wantedPos = (mobRoot.CFrame * CFrame.new(0, 0, State.FarmDistance)).Position
+    end
+
+    -- Instantly snap to position AND face the mob — zero delay, mirrors mob movement
+    root.CFrame = CFrame.new(wantedPos, targetPos)
 end))
 
 

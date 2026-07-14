@@ -1198,24 +1198,24 @@ local function doAutoFarmStep()
             local npcWorkspace = WS:FindFirstChild("Npc_Workspace")
             local questGiversFolder = npcWorkspace and npcWorkspace:FindFirstChild("QuestGivers")
             local mobFolders = {npcZones, npcWorkspace}
-            -- Normalize quest target name for comparison
+            -- Normalize: lowercase, strip spaces
             local cleanTarget = targetName:lower():gsub("%s+", "")
             local bestDist = math.huge
             local bestMob = nil
             for _, f in ipairs(mobFolders) do
                 if f then
                     for _, m in ipairs(f:GetDescendants()) do
-                        -- Skip QuestGiver folder entirely
+                        -- Never target anything inside QuestGivers
                         if questGiversFolder and m:IsDescendantOf(questGiversFolder) then continue end
                         if m:IsA("Model") and m:FindFirstChild("HumanoidRootPart") then
-                            -- Strict: mob name must CONTAIN the quest name (not reverse)
                             local mName = m.Name:lower():gsub("%s+", "")
-                            local nameMatch = mName == cleanTarget or string.find(mName, cleanTarget, 1, true)
+                            -- Mob name must CONTAIN quest name exactly (not reverse)
+                            local nameMatch = mName == cleanTarget
+                                or string.find(mName, cleanTarget, 1, true) ~= nil
                             if nameMatch then
                                 local hum = m:FindFirstChild("Humanoid")
-                                -- Quest givers: MaxHealth==0 or have a ProximityPrompt child
-                                local hasPrompt = m:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
-                                if hum and hum.Health > 0 and hum.MaxHealth > 0 and not hasPrompt then
+                                -- MaxHealth > 0 filters out non-combat NPCs
+                                if hum and hum.Health > 0 and hum.MaxHealth > 0 then
                                     local d = (root.Position - m.HumanoidRootPart.Position).Magnitude
                                     if d < bestDist then
                                         bestDist = d

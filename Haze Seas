@@ -1192,27 +1192,30 @@ local function doAutoFarmStep()
 
         -- Persistent target handling: keep current mob until it dies
         if not currentTargetMob or not currentTargetMob:FindFirstChild("Humanoid") or currentTargetMob.Humanoid.Health <= 0 then
-            -- Find a new target mob — only search in NPC-specific folders, NOT all of Workspace
+                    -- Find a new target mob — strict name match, exclude quest NPCs
             local targetName = activeQ.NPCName
             local npcZones     = WS:FindFirstChild("NPC Zones")
             local npcWorkspace = WS:FindFirstChild("Npc_Workspace")
-            -- Exclude the QuestGivers subfolder so we never target quest NPCs
             local questGiversFolder = npcWorkspace and npcWorkspace:FindFirstChild("QuestGivers")
             local mobFolders = {npcZones, npcWorkspace}
-            local cleanTarget = targetName:lower():gsub("s$", ""):gsub("%s+", "")
+            -- Normalize quest target name for comparison
+            local cleanTarget = targetName:lower():gsub("%s+", "")
             local bestDist = math.huge
             local bestMob = nil
             for _, f in ipairs(mobFolders) do
                 if f then
                     for _, m in ipairs(f:GetDescendants()) do
-                        -- Skip anything inside QuestGivers
+                        -- Skip QuestGiver folder entirely
                         if questGiversFolder and m:IsDescendantOf(questGiversFolder) then continue end
                         if m:IsA("Model") and m:FindFirstChild("HumanoidRootPart") then
+                            -- Strict: mob name must CONTAIN the quest name (not reverse)
                             local mName = m.Name:lower():gsub("%s+", "")
-                            if string.find(mName, cleanTarget) or string.find(cleanTarget, mName) then
+                            local nameMatch = mName == cleanTarget or string.find(mName, cleanTarget, 1, true)
+                            if nameMatch then
                                 local hum = m:FindFirstChild("Humanoid")
-                                -- Quest givers have MaxHealth == 0; real mobs have MaxHealth > 0
-                                if hum and hum.Health > 0 and hum.MaxHealth > 0 then
+                                -- Quest givers: MaxHealth==0 or have a ProximityPrompt child
+                                local hasPrompt = m:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
+                                if hum and hum.Health > 0 and hum.MaxHealth > 0 and not hasPrompt then
                                     local d = (root.Position - m.HumanoidRootPart.Position).Magnitude
                                     if d < bestDist then
                                         bestDist = d
@@ -1451,8 +1454,10 @@ track(RunService.RenderStepped:Connect(function()
         wantedPos = (mobRoot.CFrame * CFrame.new(0, 0, State.FarmDistance)).Position
     end
 
-    -- Instantly snap to position AND face the mob — zero delay, mirrors mob movement
-    root.CFrame = CFrame.new(wantedPos, targetPos)
+    -- Lerp to position so tiny mob movements don't cause camera shake
+    -- 0.85 factor = visually instant but smoothed — no jitter
+    local targetCF = CFrame.new(wantedPos, targetPos)
+    root.CFrame = root.CFrame:Lerp(targetCF, 0.85)
 end))
 
 

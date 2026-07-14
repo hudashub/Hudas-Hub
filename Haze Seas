@@ -487,29 +487,22 @@ local function createColumnLayout(pageFrame)
     grid.AutomaticSize = Enum.AutomaticSize.Y
     
     local col1 = Instance.new("Frame", grid)
-    col1.Size = UDim2.new(0.5, -8, 0, 0)
+    col1.Size = UDim2.new(1, 0, 0, 0)   -- full width
     col1.BackgroundTransparency = 1
     col1.AutomaticSize = Enum.AutomaticSize.Y
     local l1 = Instance.new("UIListLayout", col1)
     l1.SortOrder = Enum.SortOrder.LayoutOrder; l1.Padding = UDim.new(0, 12)
-    
-    local col2 = Instance.new("Frame", grid)
-    col2.Size = UDim2.new(0.5, -8, 0, 0)
-    col2.Position = UDim2.new(0.5, 8, 0, 0)
-    col2.BackgroundTransparency = 1
-    col2.AutomaticSize = Enum.AutomaticSize.Y
-    local l2 = Instance.new("UIListLayout", col2)
-    l2.SortOrder = Enum.SortOrder.LayoutOrder; l2.Padding = UDim.new(0, 12)
-    
+
+    -- col2 is unused — hide it and alias to col1 so legacy assignments still work
+    local col2 = col1
+
     local function updateCanvas()
         local h1 = l1.AbsoluteContentSize.Y
-        local h2 = l2.AbsoluteContentSize.Y
-        scroller.CanvasSize = UDim2.new(0, 0, 0, math.max(h1, h2) + 30)
+        scroller.CanvasSize = UDim2.new(0, 0, 0, h1 + 30)
     end
     track(l1:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvas))
-    track(l2:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvas))
     task.spawn(updateCanvas)
-    
+
     return col1, col2
 end
 
@@ -563,22 +556,25 @@ local function toggle(icon, txt, onFn, key)
     Instance.new("UICorner", thumb).CornerRadius = UDim.new(1, 0)
     
     local on = false
-    local ti = TweenInfo.new(0.16, Enum.EasingStyle.Quad)
     local btn = Instance.new("TextButton", row)
     btn.Size = UDim2.new(1, 0, 1, 0)
     btn.BackgroundTransparency = 1; btn.Text = ""
     btn.Active = false
-    
+
     local function set(state)
         on = state
         if on then
-            TweenService:Create(trackUI, ti, {BackgroundColor3 = Color3.fromRGB(235, 70, 50)}):Play()
-            TweenService:Create(thumb, ti, {Position = UDim2.new(0, 19, 0.5, -7), BackgroundColor3 = Color3.new(1, 1, 1)}):Play()
-            row.BackgroundColor3 = Color3.fromRGB(20, 14, 15); rst.Transparency = 0.65
+            trackUI.BackgroundColor3 = Color3.fromRGB(235, 70, 50)
+            thumb.Position = UDim2.new(0, 19, 0.5, -7)
+            thumb.BackgroundColor3 = Color3.new(1, 1, 1)
+            row.BackgroundColor3 = Color3.fromRGB(20, 14, 15)
+            rst.Transparency = 0.65
         else
-            TweenService:Create(trackUI, ti, {BackgroundColor3 = Color3.fromRGB(35, 35, 40)}):Play()
-            TweenService:Create(thumb, ti, {Position = UDim2.new(0, 3, 0.5, -7), BackgroundColor3 = Color3.fromRGB(120, 120, 130)}):Play()
-            row.BackgroundColor3 = Color3.fromRGB(12, 12, 14); rst.Transparency = 0.85
+            trackUI.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+            thumb.Position = UDim2.new(0, 3, 0.5, -7)
+            thumb.BackgroundColor3 = Color3.fromRGB(120, 120, 130)
+            row.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+            rst.Transparency = 0.85
         end
         onFn(on)
     end
@@ -681,8 +677,8 @@ local function dropdown(titleText, items, getState, setState, key)
     local open = false
     hbtn.MouseButton1Click:Connect(function()
         open = not open
-        local ti = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
-        TweenService:Create(holder, ti, {Size = UDim2.new(1, 0, 0, open and (headH + contentH) or headH)}):Play()
+        -- Instant expand/collapse — no animation
+        holder.Size = UDim2.new(1, 0, 0, open and (headH + contentH) or headH)
         chev.Text = open and "^" or "v"
     end)
     
@@ -1192,36 +1188,33 @@ local function doAutoFarmStep()
 
         -- Persistent target handling: keep current mob until it dies
         if not currentTargetMob or not currentTargetMob:FindFirstChild("Humanoid") or currentTargetMob.Humanoid.Health <= 0 then
-                    -- Find a new target mob — strict name match, exclude quest NPCs
             local targetName = activeQ.NPCName
-            local npcZones     = WS:FindFirstChild("NPC Zones")
             local npcWorkspace = WS:FindFirstChild("Npc_Workspace")
             local questGiversFolder = npcWorkspace and npcWorkspace:FindFirstChild("QuestGivers")
-            local mobFolders = {npcZones, npcWorkspace}
-            -- Normalize: lowercase, strip spaces
-            local cleanTarget = targetName:lower():gsub("%s+", "")
+
+            -- Normalize: lowercase, strip spaces, strip trailing 's' (plural → singular)
+            local cleanTarget  = targetName:lower():gsub("%s+", ""):gsub("s$", "")
             local bestDist = math.huge
-            local bestMob = nil
-            for _, f in ipairs(mobFolders) do
-                if f then
-                    for _, m in ipairs(f:GetDescendants()) do
-                        -- Never target anything inside QuestGivers
-                        if questGiversFolder and m:IsDescendantOf(questGiversFolder) then continue end
-                        if m:IsA("Model") and m:FindFirstChild("HumanoidRootPart") then
-                            local mName = m.Name:lower():gsub("%s+", "")
-                            -- Mob name must CONTAIN quest name exactly (not reverse)
-                            local nameMatch = mName == cleanTarget
-                                or string.find(mName, cleanTarget, 1, true) ~= nil
-                            if nameMatch then
-                                local hum = m:FindFirstChild("Humanoid")
-                                -- MaxHealth > 0 filters out non-combat NPCs
-                                if hum and hum.Health > 0 and hum.MaxHealth > 0 then
-                                    local d = (root.Position - m.HumanoidRootPart.Position).Magnitude
-                                    if d < bestDist then
-                                        bestDist = d
-                                        bestMob = m
-                                    end
-                                end
+            local bestMob  = nil
+
+            -- Search all workspace descendants — mobs can be anywhere in the map
+            for _, m in ipairs(WS:GetDescendants()) do
+                -- Skip QuestGiver NPCs entirely
+                if questGiversFolder and m:IsDescendantOf(questGiversFolder) then continue end
+                if m:IsA("Model") and m:FindFirstChild("HumanoidRootPart") then
+                    -- Normalize mob name the same way (strip plural s too)
+                    local mName = m.Name:lower():gsub("%s+", ""):gsub("s$", "")
+                    -- Match: mob name equals OR contains the quest target name
+                    local nameMatch = mName == cleanTarget
+                        or string.find(mName, cleanTarget, 1, true) ~= nil
+                    if nameMatch then
+                        local hum = m:FindFirstChild("Humanoid")
+                        -- MaxHealth > 0 filters out non-combat NPCs (quest givers = 0)
+                        if hum and hum.Health > 0 and hum.MaxHealth > 0 then
+                            local d = (root.Position - m.HumanoidRootPart.Position).Magnitude
+                            if d < bestDist then
+                                bestDist = d
+                                bestMob = m
                             end
                         end
                     end

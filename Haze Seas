@@ -1020,36 +1020,34 @@ local function doAutoFarmStep()
 
             local higherExists = highestQ.Req > currentReq
 
-            if questDone or higherExists then
-                -- Quest is done or a better one is available — cancel current quest
+            -- Ensure AutoQuest is ON so the game auto-completes/turns in/repeats
+            local pd2 = player:FindFirstChild("PlayerData")
+            local aq2 = pd2 and pd2:FindFirstChild("AutoQuest")
+            if aq2 and aq2.Value == false then
+                local tq2 = RS:FindFirstChild("Replication")
+                    and RS.Replication:FindFirstChild("ClientEvents")
+                    and RS.Replication.ClientEvents:FindFirstChild("ToggleAutoQuest")
+                if tq2 then tq2:FireServer() end
+            end
+
+            if higherExists then
+                -- A better quest is available — cancel current quest
                 -- and let the script go pick up the new one
                 needQuest = true
 
-                -- Ensure AutoQuest is ON so the game auto-completes/turns in
-                local pd2 = player:FindFirstChild("PlayerData")
-                local aq2 = pd2 and pd2:FindFirstChild("AutoQuest")
-                if aq2 and aq2.Value == false then
-                    local tq2 = RS:FindFirstChild("Replication")
-                        and RS.Replication:FindFirstChild("ClientEvents")
-                        and RS.Replication.ClientEvents:FindFirstChild("ToggleAutoQuest")
-                    if tq2 then tq2:FireServer() end
-                end
-
-                -- Cancel (X) the quest only if there's a higher one available
-                if higherExists then
-                    local questGui = player.PlayerGui:FindFirstChild("QuestGui")
-                    local mf2 = questGui and questGui:FindFirstChild("MainFrame")
-                    local closeBtn2 = mf2 and (mf2:FindFirstChild("CloseButton") or mf2:FindFirstChild("ExitButton") or mf2:FindFirstChild("X"))
-                    if closeBtn2 then
-                        pcall(function()
-                            for _, conn in ipairs(getconnections(closeBtn2.MouseButton1Click)) do conn:Fire() end
-                            for _, conn in ipairs(getconnections(closeBtn2.Activated))        do conn:Fire() end
-                        end)
-                        task.wait(0.3)
-                        currentTargetMob = nil -- reset target after quest change
-                    end
+                local questGui = player.PlayerGui:FindFirstChild("QuestGui")
+                local mf2 = questGui and questGui:FindFirstChild("MainFrame")
+                local closeBtn2 = mf2 and (mf2:FindFirstChild("CloseButton") or mf2:FindFirstChild("ExitButton") or mf2:FindFirstChild("X"))
+                if closeBtn2 then
+                    pcall(function()
+                        for _, conn in ipairs(getconnections(closeBtn2.MouseButton1Click)) do conn:Fire() end
+                        for _, conn in ipairs(getconnections(closeBtn2.Activated))        do conn:Fire() end
+                    end)
+                    task.wait(0.3)
+                    currentTargetMob = nil -- reset target after quest change
                 end
             end
+
         else
             -- No active quest at all — go get one
             needQuest = true
@@ -1294,32 +1292,28 @@ local function doAutoFarmStep()
             -- Just fire the attack here on the 10Hz tick
             if tick() - lastAttack > 0.15 then
                 lastAttack = tick()
-                -- Equip weapon if none is held
-                local char2 = player.Character
-                local heldTool = char2 and char2:FindFirstChildWhichIsA("Tool")
-                if not heldTool then
-                    local bp2 = player:FindFirstChild("Backpack")
-                    local hum2 = char2 and char2:FindFirstChild("Humanoid")
-                    if bp2 and hum2 then
-                        local anyTool = bp2:FindFirstChildWhichIsA("Tool")
-                        if anyTool then hum2:EquipTool(anyTool) end
+                -- Gate attack on Dialogue not open
+                local tgOpen = player.PlayerGui:FindFirstChild("Tutorial_Gui") and player.PlayerGui.Tutorial_Gui.Enabled
+                if not tgOpen then
+                    -- Equip weapon if none is held
+                    local char2 = player.Character
+                    local heldTool = char2 and char2:FindFirstChildWhichIsA("Tool")
+                    if not heldTool then
+                        local bp2 = player:FindFirstChild("Backpack")
+                        local hum2 = char2 and char2:FindFirstChild("Humanoid")
+                        if bp2 and hum2 then
+                            local anyTool = bp2:FindFirstChildWhichIsA("Tool")
+                            if anyTool then hum2:EquipTool(anyTool) end
+                        end
+                    end
+                    -- Attack directly via tool activation (no screen click needed)
+                    local finalTool = char2 and char2:FindFirstChildWhichIsA("Tool")
+                    if finalTool then
+                        finalTool:Activate()
                     end
                 end
-                -- Warp mouse cursor TO the mob's screen position so the
-                -- game's hit detection always targets the mob, not wherever
-                -- the player was last looking.
-                local camera = workspace.CurrentCamera
-                if camera then
-                    local screenPos, onScreen = camera:WorldToScreenPoint(targetPos)
-                    local sx = onScreen and screenPos.X or camera.ViewportSize.X / 2
-                    local sy = onScreen and screenPos.Y or camera.ViewportSize.Y / 2
-                    local VIM2 = game:GetService("VirtualInputManager")
-                    VIM2:SendMouseMoveEvent(sx, sy, game) -- lock cursor on mob
-                    VR:ClickButton1(Vector2.new(sx, sy))  -- click exactly there
-                else
-                    VR:ClickButton1(Vector2.new(0, 0))
-                end
             end
+
             -- (health‑bar heartbeat effect removed)
         else
             -- No mob — let player move freely
@@ -1371,10 +1365,18 @@ local function doCombatFeatures()
     local MOB_ATTACK_RANGE = 30 -- studs — only attack/use skills within this range
     local mobNearby = nearestMobDist <= MOB_ATTACK_RANGE
 
+    -- Gate all general combat inputs on Dialogue not open
+    local tgOpen = player.PlayerGui:FindFirstChild("Tutorial_Gui") and player.PlayerGui.Tutorial_Gui.Enabled
+    if tgOpen then return end
+
     -- Auto Attack (only when mob is nearby)
     if State.AutoAttack and not State.AutoFarmLevel and mobNearby then
-        -- Auto Farm already handles clicking, so we only click here if AutoFarm is off
-        VR:ClickButton1(Vector2.new(0,0))
+        local tool = char:FindFirstChildWhichIsA("Tool")
+        if tool then
+            tool:Activate()
+        else
+            VR:ClickButton1(Vector2.new(0,0))
+        end
     end
 
     -- Auto Haki / Observation
@@ -1401,26 +1403,27 @@ local function doCombatFeatures()
             end
         end
 
-    -- Auto Skills: fire only selected keys when a mob is nearby
-    if State.AutoSkills and #State.SkillKeys > 0 and mobNearby then
-        local VIM = game:GetService("VirtualInputManager")
-        local keyMap = {
-            Z="Z", X="X", C="C", V="V", Q="Q", E="E",
-            R="R", F="F", G="G", T="T",
-            ["1"]="One", ["2"]="Two", ["3"]="Three", ["4"]="Four",
-        }
-        for _, k in ipairs(State.SkillKeys) do
-            local enumName = keyMap[k]
-            local keyCode = enumName and Enum.KeyCode[enumName]
-            if keyCode then
-                VIM:SendKeyEvent(true,  keyCode, false, game)
-                task.wait(0.05)
-                VIM:SendKeyEvent(false, keyCode, false, game)
-                task.wait(0.05)
+        -- Auto Skills: fire only selected keys when a mob is nearby
+        if State.AutoSkills and #State.SkillKeys > 0 and mobNearby then
+            local VIM = game:GetService("VirtualInputManager")
+            local keyMap = {
+                Z="Z", X="X", C="C", V="V", Q="Q", E="E",
+                R="R", F="F", G="G", T="T",
+                ["1"]="One", ["2"]="Two", ["3"]="Three", ["4"]="Four",
+            }
+            for _, k in ipairs(State.SkillKeys) do
+                local enumName = keyMap[k]
+                local keyCode = enumName and Enum.KeyCode[enumName]
+                if keyCode then
+                    VIM:SendKeyEvent(true,  keyCode, false, game)
+                    task.wait(0.05)
+                    VIM:SendKeyEvent(false, keyCode, false, game)
+                    task.wait(0.05)
+                end
             end
         end
     end
-    end
+
 
     -- Attachment Spoofing Kill Aura / Hitbox Expander
     local tool = char:FindFirstChildWhichIsA("Tool")

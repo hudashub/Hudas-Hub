@@ -956,7 +956,19 @@ local function doAutoFarmStep()
         if char then
             for _, part in ipairs(char:GetDescendants()) do
                 if part:IsA("BasePart") then
-                    part.CanCollide = true
+                    local orig = part:GetAttribute("OriginalCanCollide")
+                    if orig ~= nil then
+                        part.CanCollide = orig
+                        part:SetAttribute("OriginalCanCollide", nil)
+                    else
+                        -- Fallback to standard R15/R6 collision parameters
+                        local name = part.Name
+                        if name == "UpperTorso" or name == "LowerTorso" or name == "Torso" or name == "Head" or name == "HumanoidRootPart" then
+                            part.CanCollide = true
+                        else
+                            part.CanCollide = false
+                        end
+                    end
                 end
             end
         end
@@ -966,9 +978,13 @@ local function doAutoFarmStep()
     -- Noclip: disable collision so player flies through walls to reach mobs
     for _, part in ipairs(char:GetDescendants()) do
         if part:IsA("BasePart") then
+            if part:GetAttribute("OriginalCanCollide") == nil then
+                part:SetAttribute("OriginalCanCollide", part.CanCollide)
+            end
             part.CanCollide = false
         end
     end
+
 
     -- Run quest check occasionally
     if tick() - lastNpcCheck > 0.5 then
@@ -1646,3 +1662,4 @@ trackThread(task.spawn(function()
 end))
 
 warn("[Haze Seas Hub] Premium Hudas Hub Script Loaded!")
+

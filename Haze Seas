@@ -12,6 +12,9 @@ local WS               = game:GetService("Workspace")
 local VR               = game:GetService("VirtualUser")
 
 if _G.__HAZE_CLEANUP then pcall(_G.__HAZE_CLEANUP) end
+_G.HazeSeasLoopID = (_G.HazeSeasLoopID or 0) + 1
+local myLoopID = _G.HazeSeasLoopID
+
 local _CONNS, _THREADS = {}, {}
 local function track(conn) table.insert(_CONNS, conn); return conn end
 local function trackThread(t) table.insert(_THREADS, t); return t end
@@ -22,6 +25,7 @@ _G.__HAZE_CLEANUP = function()
 end
 
 local player = Players.LocalPlayer
+
 local State = {
     AntiAFK = true,
     AutoFarmLevel = false,
@@ -150,7 +154,26 @@ local function tweenTo(cframe, speed)
 end
 
 
+local function virtualClick(guiObject)
+    if not guiObject or not guiObject:IsA("GuiObject") then return end
+    local VIM = game:GetService("VirtualInputManager")
+    local absPos = guiObject.AbsolutePosition
+    local absSize = guiObject.AbsoluteSize
+    local clickX = absPos.X + absSize.X / 2
+    local inset = game:GetService("GuiService"):GetGuiInset()
+    clickX = clickX + inset.X
+    local clickY = absPos.Y + absSize.Y / 2 + inset.Y
+    
+    pcall(function()
+        VIM:SendMouseButtonEvent(clickX, clickY, 0, true, game, 1)
+        task.wait(0.05)
+        VIM:SendMouseButtonEvent(clickX, clickY, 0, false, game, 1)
+    end)
+end
+
+
 -- Anti-AFK connection
+
 local function startAntiAFK()
     local connection = player.Idled:Connect(function()
         VR:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
@@ -957,7 +980,7 @@ local needQuest = false
 
 
 local function doAutoFarmStep()
-
+    if myLoopID ~= _G.HazeSeasLoopID then return end
 
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -1115,15 +1138,12 @@ local function doAutoFarmStep()
             if diagLabel and (diagLabel.Text:lower():match("already on quest") or diagLabel.Text:lower():match("good luck")) then
                 local closeBtn = frame:FindFirstChild("CloseButton") or frame:FindFirstChild("Skip") or frame:FindFirstChild("Button")
                 if closeBtn then
-                    pcall(function()
-                        for _, conn in ipairs(getconnections(closeBtn.MouseButton1Click)) do conn:Fire() end
-                        for _, conn in ipairs(getconnections(closeBtn.MouseButton1Down))  do conn:Fire() end
-                        for _, conn in ipairs(getconnections(closeBtn.Activated))         do conn:Fire() end
-                    end)
+                    virtualClick(closeBtn)
                 end
                 task.wait(0.2)
             end
         end
+
 
 
 
@@ -1216,25 +1236,20 @@ local function doAutoFarmStep()
                         -- Try standard skip/next/ok buttons
                         local cb3 = fr3:FindFirstChild("CloseButton") or fr3:FindFirstChild("Skip") or fr3:FindFirstChild("Next") or fr3:FindFirstChild("Ok")
                         if cb3 then
-                            pcall(function()
-                                for _, c in ipairs(getconnections(cb3.MouseButton1Click)) do c:Fire() end
-                                for _, c in ipairs(getconnections(cb3.Activated))         do c:Fire() end
-                            end)
+                            virtualClick(cb3)
                             task.wait(0.3)
                         else
                             -- Fallback: click Dialogue text frame itself to advance/dismiss conversation
                             local dialogueWrapper = fr3:FindFirstChild("DialogueWrapper")
                             local diagLabel = dialogueWrapper and dialogueWrapper:FindFirstChild("Frame") and dialogueWrapper.Frame:FindFirstChild("Dialogue")
                             if diagLabel then
-                                pcall(function()
-                                    for _, conn in ipairs(getconnections(diagLabel.MouseButton1Click)) do conn:Fire() end
-                                    for _, conn in ipairs(getconnections(dialogueWrapper.MouseButton1Click)) do conn:Fire() end
-                                end)
+                                virtualClick(diagLabel)
                                 task.wait(0.3)
                             end
                         end
                     end
                 end
+
 
 
 
@@ -1292,11 +1307,7 @@ local function doAutoFarmStep()
                             if ansLabel and button then
                                 local txt = ansLabel.Text:lower()
                                 if string.find(txt, "close") or string.find(txt, "deny") or string.find(txt, "cancel") then
-                                    pcall(function()
-                                        for _, conn in ipairs(getconnections(button.MouseButton1Click)) do conn:Fire() end
-                                        for _, conn in ipairs(getconnections(button.MouseButton1Down))  do conn:Fire() end
-                                        for _, conn in ipairs(getconnections(button.Activated))         do conn:Fire() end
-                                    end)
+                                    virtualClick(button)
                                     task.wait(0.2)
                                 end
                             end
@@ -1307,20 +1318,14 @@ local function doAutoFarmStep()
                 -- 2. Try standard skip/next/ok buttons
                 local cbFarm = frFarm:FindFirstChild("CloseButton") or frFarm:FindFirstChild("Skip") or frFarm:FindFirstChild("Next") or frFarm:FindFirstChild("Ok")
                 if cbFarm then
-                    pcall(function()
-                        for _, c in ipairs(getconnections(cbFarm.MouseButton1Click)) do c:Fire() end
-                        for _, c in ipairs(getconnections(cbFarm.Activated))         do c:Fire() end
-                    end)
+                    virtualClick(cbFarm)
                     task.wait(0.2)
                 else
                     -- Fallback: click dialogue label to advance/dismiss lingering text
                     local dialogueWrapper = frFarm:FindFirstChild("DialogueWrapper")
                     local diagLabel = dialogueWrapper and dialogueWrapper:FindFirstChild("Frame") and dialogueWrapper.Frame:FindFirstChild("Dialogue")
                     if diagLabel then
-                        pcall(function()
-                            for _, conn in ipairs(getconnections(diagLabel.MouseButton1Click)) do conn:Fire() end
-                            for _, conn in ipairs(getconnections(dialogueWrapper.MouseButton1Click)) do conn:Fire() end
-                        end)
+                        virtualClick(diagLabel)
                         task.wait(0.2)
                     end
                 end
@@ -1446,7 +1451,9 @@ end
 
 
 local function doCombatFeatures()
+    if myLoopID ~= _G.HazeSeasLoopID then return end
     if State.AutoFarmLevel and needQuest then
+
         return
     end
 
@@ -1653,17 +1660,21 @@ end
 -- Run farm loop at 10Hz for quest logic, combat, etc.
 trackThread(task.spawn(function()
     while true do
+        if myLoopID ~= _G.HazeSeasLoopID then break end
         pcall(doAutoFarmStep)
         pcall(doCombatFeatures)
         task.wait(0.1)
     end
 end))
 
+
 -- ── RenderStepped: instant zero-delay mob attachment every frame ────
 -- Runs client-side before each render. Sets CFrame directly so the
 -- character moves WITH the mob instantly, no spring/delay.
 track(RunService.RenderStepped:Connect(function()
+    if myLoopID ~= _G.HazeSeasLoopID then return end
     if not State.AutoFarmLevel then return end
+
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root or not currentTargetMob then return end

@@ -1235,15 +1235,16 @@ local function doAutoFarmStep()
             lastTargetName = activeQ.NPCName
         end
         
-        -- Make sure we are anchored and platformstanding during farm to prevent gravity/animation jitter
-        root.Anchored = true
+        -- Unanchor and disable PlatformStand so animations play and weapon hits register normally!
+        root.Anchored = false
         if char:FindFirstChild("Humanoid") then
-            char.Humanoid.PlatformStand = true
+            char.Humanoid.PlatformStand = false
         end
         if lastTween then 
             lastTween:Cancel() 
             lastTween = nil 
         end
+
 
 
         -- Close any lingering NPC dialogue so we don't get stuck at the NPC
@@ -1342,10 +1343,34 @@ local function doAutoFarmStep()
         if targetMob then
             local mobRoot = targetMob.HumanoidRootPart
             local targetPos = mobRoot.Position
-            local ourPos
             
-            -- ── Position is handled by RenderStepped (instant, zero delay) ──
+            -- If we are far from the target mob, tween to it smoothly at 220 studs/sec
+            -- instead of instant-teleporting (bypasses anti-cheat & makes camera smooth)
+            local dist = (root.Position - targetPos).Magnitude
+            if dist > 20 then
+                local wantedPos
+                if State.FarmPosition == "Above" then
+                    wantedPos = targetPos + Vector3.new(0, State.FarmDistance, 0)
+                elseif State.FarmPosition == "Under" then
+                    wantedPos = targetPos + Vector3.new(0, -State.FarmDistance, 0)
+                else -- Behind
+                    wantedPos = (mobRoot.CFrame * CFrame.new(0, 0, State.FarmDistance)).Position
+                end
+                local targetCF = CFrame.new(wantedPos, targetPos)
+                
+                if not (lastTween and lastTween.PlaybackState == Enum.PlaybackState.Playing) then
+                    lastTween = tweenTo(targetCF, 220) -- 220 studs/second speed
+                end
+                return
+            end
+            
+            if lastTween then 
+                lastTween:Cancel() 
+                lastTween = nil 
+            end
+            
             -- Just fire the attack here on the 10Hz tick if AutoAttack is enabled
+
             if State.AutoAttack and tick() - lastAttack > 0.15 then
                 lastAttack = tick()
                 -- Gate attack on Dialogue not open and mob within 25 studs range

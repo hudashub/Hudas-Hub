@@ -1132,16 +1132,42 @@ local function doAutoFarmStep()
                 if tg and tg.Enabled then
                     local mf3 = tg:FindFirstChild("MainFrame")
                     local fr3 = mf3 and mf3:FindFirstChild("Frame")
-                    -- Support Next/Ok buttons in addition to CloseButton/Skip
-                    local cb3 = fr3 and (fr3:FindFirstChild("CloseButton") or fr3:FindFirstChild("Skip") or fr3:FindFirstChild("Next") or fr3:FindFirstChild("Ok"))
-                    if cb3 then
-                        pcall(function()
-                            for _, c in ipairs(getconnections(cb3.MouseButton1Click)) do c:Fire() end
-                            for _, c in ipairs(getconnections(cb3.Activated))         do c:Fire() end
-                        end)
-                        task.wait(0.3)
+                    if fr3 then
+                        -- Try decision close options first
+                        local decFrame = fr3:FindFirstChild("Decision")
+                        if decFrame then
+                            for _, choice in ipairs(decFrame:GetChildren()) do
+                                if choice.Name == "Decision" then
+                                    local ansWrapper = choice:FindFirstChild("AnswerWrapper")
+                                    local ansLabel = ansWrapper and ansWrapper:FindFirstChild("Answer")
+                                    local button = choice:FindFirstChild("Button")
+                                    if ansLabel and button then
+                                        local txt = ansLabel.Text:lower()
+                                        if string.find(txt, "close") or string.find(txt, "deny") or string.find(txt, "cancel") then
+                                            pcall(function()
+                                                for _, conn in ipairs(getconnections(button.MouseButton1Click)) do conn:Fire() end
+                                                for _, conn in ipairs(getconnections(button.MouseButton1Down))  do conn:Fire() end
+                                                for _, conn in ipairs(getconnections(button.Activated))         do conn:Fire() end
+                                            end)
+                                            task.wait(0.2)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        -- Try standard skip/next/ok buttons
+                        local cb3 = fr3:FindFirstChild("CloseButton") or fr3:FindFirstChild("Skip") or fr3:FindFirstChild("Next") or fr3:FindFirstChild("Ok")
+                        if cb3 then
+                            pcall(function()
+                                for _, c in ipairs(getconnections(cb3.MouseButton1Click)) do c:Fire() end
+                                for _, c in ipairs(getconnections(cb3.Activated))         do c:Fire() end
+                            end)
+                            task.wait(0.3)
+                        end
                     end
                 end
+
 
                 -- Only fire prompt if quest dialogue is NOT already open and cooldown has passed
                 local tutorialGuiOpen = player.PlayerGui:FindFirstChild("Tutorial_Gui") and player.PlayerGui.Tutorial_Gui.Enabled
@@ -1173,18 +1199,7 @@ local function doAutoFarmStep()
             local mfFarm = tgFarm:FindFirstChild("MainFrame")
             local frFarm = mfFarm and mfFarm:FindFirstChild("Frame")
             if frFarm then
-                -- 1. Try standard skip/next/ok buttons
-                local cbFarm = frFarm:FindFirstChild("CloseButton") or frFarm:FindFirstChild("Skip") or frFarm:FindFirstChild("Next") or frFarm:FindFirstChild("Ok")
-                if cbFarm then
-                    pcall(function()
-                        for _, c in ipairs(getconnections(cbFarm.MouseButton1Click)) do c:Fire() end
-                        for _, c in ipairs(getconnections(cbFarm.Activated))         do c:Fire() end
-                    end)
-                    task.wait(0.2)
-                    return
-                end
-                
-                -- 2. Try decision close options (e.g. [CLOSE])
+                -- 1. Try decision close options first (e.g. [CLOSE])
                 local decFrame = frFarm:FindFirstChild("Decision")
                 if decFrame then
                     for _, choice in ipairs(decFrame:GetChildren()) do
@@ -1201,14 +1216,29 @@ local function doAutoFarmStep()
                                         for _, conn in ipairs(getconnections(button.Activated))         do conn:Fire() end
                                     end)
                                     task.wait(0.2)
-                                    return
                                 end
                             end
                         end
                     end
                 end
+
+                -- 2. Try standard skip/next/ok buttons
+                local cbFarm = frFarm:FindFirstChild("CloseButton") or frFarm:FindFirstChild("Skip") or frFarm:FindFirstChild("Next") or frFarm:FindFirstChild("Ok")
+                if cbFarm then
+                    pcall(function()
+                        for _, c in ipairs(getconnections(cbFarm.MouseButton1Click)) do c:Fire() end
+                        for _, c in ipairs(getconnections(cbFarm.Activated))         do c:Fire() end
+                    end)
+                    task.wait(0.2)
+                end
+            end
+            
+            -- Only return/wait if dialogue remains open
+            if tgFarm.Enabled then
+                return
             end
         end
+
 
         -- Enable built-in AutoQuest if off
         local pd = player:FindFirstChild("PlayerData")

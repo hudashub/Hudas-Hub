@@ -1111,26 +1111,20 @@ local function doAutoFarmStep()
             local mainFrame = tutorialGui:FindFirstChild("MainFrame")
             local frame = mainFrame and mainFrame:FindFirstChild("Frame")
             local dialogueWrapper = frame and frame:FindFirstChild("DialogueWrapper")
-            local diagLabel = dialogueWrapper and dialogueWrapper:FindFirstChild("Frame")
-                and dialogueWrapper.Frame:FindFirstChild("Dialogue")
+            local diagLabel = dialogueWrapper and dialogueWrapper:FindFirstChild("Dialogue", true)
             if diagLabel and (diagLabel.Text:lower():match("already on quest") or diagLabel.Text:lower():match("good luck")) then
-                local closeBtn = frame:FindFirstChild("CloseButton") or frame:FindFirstChild("Skip")
+                local closeBtn = frame:FindFirstChild("CloseButton") or frame:FindFirstChild("Skip") or frame:FindFirstChild("Button")
                 if closeBtn then
                     pcall(function()
                         for _, conn in ipairs(getconnections(closeBtn.MouseButton1Click)) do conn:Fire() end
                         for _, conn in ipairs(getconnections(closeBtn.MouseButton1Down))  do conn:Fire() end
                         for _, conn in ipairs(getconnections(closeBtn.Activated))         do conn:Fire() end
                     end)
-                else
-                    -- Fallback: simulate virtual click directly on the dialogue labels/containers to dismiss dialogue
-                    pcall(function()
-                        for _, conn in ipairs(getconnections(diagLabel.MouseButton1Click)) do conn:Fire() end
-                        for _, conn in ipairs(getconnections(dialogueWrapper.MouseButton1Click)) do conn:Fire() end
-                    end)
                 end
                 task.wait(0.2)
             end
         end
+
 
 
         -- If we need a quest, walk to the NPC and accept it
@@ -1802,9 +1796,10 @@ end))
 switchTab("Main")
 startAntiAFK()
 
-MF.Size = UDim2.new(0,0,0,0)
+-- Open instantly without bouncy animations
+MF.Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())
 MF.Position = UDim2.new(0.5, 0, 0.5, 0)
-TweenService:Create(MF, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())}):Play()
+
 
 -- Auto Stats point allocation loop
 trackThread(task.spawn(function()

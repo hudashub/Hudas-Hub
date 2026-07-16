@@ -131,8 +131,15 @@ local function getActiveQuest()
 end
 
 local function tweenTo(cframe, speed)
-    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChild("Humanoid")
     if not root then return end
+    
+    -- Anchor and PlatformStand to prevent physics/collision camera jitter
+    root.Anchored = true
+    if hum then hum.PlatformStand = true end
+    
     speed = speed or 150
     local dist = (root.Position - cframe.Position).Magnitude
     local time = dist / speed
@@ -141,6 +148,7 @@ local function tweenTo(cframe, speed)
     tween:Play()
     return tween
 end
+
 
 -- Anti-AFK connection
 local function startAntiAFK()
@@ -941,8 +949,12 @@ local lastNpcCheck = 0
 local lastQuestAccept = -999 -- cooldown after accepting quest to stop re-talking to NPC
 local activeQ = nil
 local highestQ = nil
+local lastTimeHadQuest = tick()
+local lastTargetName = nil
 
 local function doAutoFarmStep()
+
+
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
@@ -951,7 +963,11 @@ local function doAutoFarmStep()
         if lastTween then lastTween:Cancel(); lastTween = nil end
         clearBodyPos()          -- remove physics attachment so player can move freely
         root.Anchored = false
+        if char and char:FindFirstChild("Humanoid") then
+            char.Humanoid.PlatformStand = false
+        end
         currentTargetMob = nil  -- reset target
+
         -- Restore collision on all character parts
         if char then
             for _, part in ipairs(char:GetDescendants()) do
@@ -991,7 +1007,11 @@ local function doAutoFarmStep()
         lastNpcCheck = tick()
         activeQ = getActiveQuest()
         highestQ = getHighestQuest()
+        if activeQ then
+            lastTimeHadQuest = tick()
+        end
     end
+
 
     -- Display update
     if activeQ then
@@ -1065,9 +1085,13 @@ local function doAutoFarmStep()
             end
 
         else
-            -- No active quest at all — go get one
-            needQuest = true
+            -- No active quest at all — wait for grace period before triggering NPC visit
+            if tick() - lastTimeHadQuest > 5.0 then
+                needQuest = true
+            end
         end
+
+
 
         -- Close any open dialogue that says "already on quest" or "good luck"
         local tutorialGui = player.PlayerGui:FindFirstChild("Tutorial_Gui")
@@ -1099,7 +1123,7 @@ local function doAutoFarmStep()
                 local dest = npcModel.HumanoidRootPart.CFrame * CFrame.new(0, 0, -4) * CFrame.Angles(0, math.pi, 0)
                 if (root.Position - dest.Position).Magnitude > 8 then
                     clearBodyPos()
-                    root.Anchored = false
+                    -- let tweenTo handle anchoring/standing
                     if not (lastTween and lastTween.PlaybackState == Enum.PlaybackState.Playing) then
                         lastTween = tweenTo(dest)
                     end
@@ -1108,7 +1132,11 @@ local function doAutoFarmStep()
 
                 if lastTween then lastTween:Cancel(); lastTween = nil end
                 root.Anchored = true
+                if char:FindFirstChild("Humanoid") then
+                    char.Humanoid.PlatformStand = true
+                end
                 root.CFrame = dest
+
 
                 -- Handle NPC dialogue to accept quest
                 local tutorialGui2 = player.PlayerGui:FindFirstChild("Tutorial_Gui")
@@ -1202,10 +1230,21 @@ local function doAutoFarmStep()
 
 
     -- 2. Farm Active Quest Target
-    if not needQuest and activeQ then
-        -- Always unanchor when farming (character may still be anchored from NPC visit)
-        root.Anchored = false
-        if lastTween then lastTween:Cancel(); lastTween = nil end
+    if not needQuest and (activeQ or lastTargetName) then
+        if activeQ then
+            lastTargetName = activeQ.NPCName
+        end
+        
+        -- Make sure we are anchored and platformstanding during farm to prevent gravity/animation jitter
+        root.Anchored = true
+        if char:FindFirstChild("Humanoid") then
+            char.Humanoid.PlatformStand = true
+        end
+        if lastTween then 
+            lastTween:Cancel() 
+            lastTween = nil 
+        end
+
 
         -- Close any lingering NPC dialogue so we don't get stuck at the NPC
         local tgFarm = player.PlayerGui:FindFirstChild("Tutorial_Gui")
@@ -1264,7 +1303,8 @@ local function doAutoFarmStep()
 
         -- Persistent target handling: keep current mob until it dies
         if not currentTargetMob or not currentTargetMob:FindFirstChild("Humanoid") or currentTargetMob.Humanoid.Health <= 0 then
-            local targetName = activeQ.NPCName
+            local targetName = activeQ and activeQ.NPCName or lastTargetName
+
             local npcWorkspace = WS:FindFirstChild("Npc_Workspace")
             local questGiversFolder = npcWorkspace and npcWorkspace:FindFirstChild("QuestGivers")
 
@@ -1305,12 +1345,13 @@ local function doAutoFarmStep()
             local ourPos
             
             -- ── Position is handled by RenderStepped (instant, zero delay) ──
-            -- Just fire the attack here on the 10Hz tick
-            if tick() - lastAttack > 0.15 then
+            -- Just fire the attack here on the 10Hz tick if AutoAttack is enabled
+            if State.AutoAttack and tick() - lastAttack > 0.15 then
                 lastAttack = tick()
-                -- Gate attack on Dialogue not open
+                -- Gate attack on Dialogue not open and mob within 25 studs range
                 local tgOpen = player.PlayerGui:FindFirstChild("Tutorial_Gui") and player.PlayerGui.Tutorial_Gui.Enabled
-                if not tgOpen then
+                local distToMob = (root.Position - mobRoot.Position).Magnitude
+                if not tgOpen and distToMob < 25 then
                     -- Equip weapon if none is held
                     local char2 = player.Character
                     local heldTool = char2 and char2:FindFirstChildWhichIsA("Tool")
@@ -1329,8 +1370,6 @@ local function doAutoFarmStep()
                     end
                 end
             end
-
-            -- (health‑bar heartbeat effect removed)
         else
             -- No mob — let player move freely
             root.Anchored = false
@@ -1339,6 +1378,7 @@ local function doAutoFarmStep()
         root.Anchored = false
     end
 end
+
 
 local function doCombatFeatures()
     local char = player.Character
@@ -1528,11 +1568,16 @@ track(RunService.RenderStepped:Connect(function()
         wantedPos = (mobRoot.CFrame * CFrame.new(0, 0, State.FarmDistance)).Position
     end
 
-    -- Lerp to position so tiny mob movements don't cause camera shake
-    -- 0.85 factor = visually instant but smoothed — no jitter
+    -- Direct lock to position so there is zero latency/lag relative to the mob,
+    -- which completely eliminates camera bounce/shake when the mob moves.
     local targetCF = CFrame.new(wantedPos, targetPos)
-    root.CFrame = root.CFrame:Lerp(targetCF, 0.85)
+    root.CFrame = targetCF
+    pcall(function()
+        root.AssemblyLinearVelocity = Vector3.new(0,0,0)
+        root.AssemblyAngularVelocity = Vector3.new(0,0,0)
+    end)
 end))
+
 
 
 -- ─── POPULATE SETTINGS TAB ─────────────────────────────────────────
@@ -1662,4 +1707,3 @@ trackThread(task.spawn(function()
 end))
 
 warn("[Haze Seas Hub] Premium Hudas Hub Script Loaded!")
-

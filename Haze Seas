@@ -951,6 +951,8 @@ local activeQ = nil
 local highestQ = nil
 local lastTimeHadQuest = tick()
 local lastTargetName = nil
+local lastQuestCompletedTime = 0
+
 
 local function doAutoFarmStep()
 
@@ -1009,8 +1011,13 @@ local function doAutoFarmStep()
         highestQ = getHighestQuest()
         if activeQ then
             lastTimeHadQuest = tick()
+            local questDone = activeQ.Progress >= activeQ.Target and activeQ.Target > 0
+            if questDone then
+                lastQuestCompletedTime = tick()
+            end
         end
     end
+
 
 
     -- Display update
@@ -1085,11 +1092,13 @@ local function doAutoFarmStep()
             end
 
         else
-            -- No active quest at all — wait for grace period before triggering NPC visit
-            if tick() - lastTimeHadQuest > 5.0 then
+            -- No active quest at all — wait for grace period ONLY if we completed a quest recently
+            -- otherwise go get one immediately
+            if tick() - lastQuestCompletedTime > 5.0 then
                 needQuest = true
             end
         end
+
 
 
 
@@ -1109,10 +1118,17 @@ local function doAutoFarmStep()
                         for _, conn in ipairs(getconnections(closeBtn.MouseButton1Down))  do conn:Fire() end
                         for _, conn in ipairs(getconnections(closeBtn.Activated))         do conn:Fire() end
                     end)
+                else
+                    -- Fallback: simulate virtual click directly on the dialogue labels/containers to dismiss dialogue
+                    pcall(function()
+                        for _, conn in ipairs(getconnections(diagLabel.MouseButton1Click)) do conn:Fire() end
+                        for _, conn in ipairs(getconnections(dialogueWrapper.MouseButton1Click)) do conn:Fire() end
+                    end)
                 end
                 task.wait(0.2)
             end
         end
+
 
         -- If we need a quest, walk to the NPC and accept it
         if needQuest then
@@ -1206,9 +1222,21 @@ local function doAutoFarmStep()
                                 for _, c in ipairs(getconnections(cb3.Activated))         do c:Fire() end
                             end)
                             task.wait(0.3)
+                        else
+                            -- Fallback: click Dialogue text frame itself to advance/dismiss conversation
+                            local dialogueWrapper = fr3:FindFirstChild("DialogueWrapper")
+                            local diagLabel = dialogueWrapper and dialogueWrapper:FindFirstChild("Frame") and dialogueWrapper.Frame:FindFirstChild("Dialogue")
+                            if diagLabel then
+                                pcall(function()
+                                    for _, conn in ipairs(getconnections(diagLabel.MouseButton1Click)) do conn:Fire() end
+                                    for _, conn in ipairs(getconnections(dialogueWrapper.MouseButton1Click)) do conn:Fire() end
+                                end)
+                                task.wait(0.3)
+                            end
                         end
                     end
                 end
+
 
 
                 -- Only fire prompt if quest dialogue is NOT already open and cooldown has passed
@@ -1229,8 +1257,9 @@ local function doAutoFarmStep()
     end
 
 
-    -- 2. Farm Active Quest Target
+    -- 2. Farm Active Quest Target (only if we don't currently need to go to NPC)
     if not needQuest and (activeQ or lastTargetName) then
+
         if activeQ then
             lastTargetName = activeQ.NPCName
         end
@@ -1284,6 +1313,17 @@ local function doAutoFarmStep()
                         for _, c in ipairs(getconnections(cbFarm.Activated))         do c:Fire() end
                     end)
                     task.wait(0.2)
+                else
+                    -- Fallback: click dialogue label to advance/dismiss lingering text
+                    local dialogueWrapper = frFarm:FindFirstChild("DialogueWrapper")
+                    local diagLabel = dialogueWrapper and dialogueWrapper:FindFirstChild("Frame") and dialogueWrapper.Frame:FindFirstChild("Dialogue")
+                    if diagLabel then
+                        pcall(function()
+                            for _, conn in ipairs(getconnections(diagLabel.MouseButton1Click)) do conn:Fire() end
+                            for _, conn in ipairs(getconnections(dialogueWrapper.MouseButton1Click)) do conn:Fire() end
+                        end)
+                        task.wait(0.2)
+                    end
                 end
             end
             
@@ -1292,6 +1332,7 @@ local function doAutoFarmStep()
                 return
             end
         end
+
 
 
         -- Enable built-in AutoQuest if off
@@ -1487,6 +1528,38 @@ local function doCombatFeatures()
         -- Auto Skills: fire only selected keys when a mob is nearby
         if State.AutoSkills and #State.SkillKeys > 0 and mobNearby then
             local VIM = game:GetService("VirtualInputManager")
+            
+            -- Resolve aim target (current locked farm mob or nearest alive mob)
+            local targetMob = currentTargetMob
+            if not targetMob then
+                local nearest = nil
+                local dist = math.huge
+                local charRoot = char:FindFirstChild("HumanoidRootPart")
+                if charRoot then
+                    local checkFolders = {WS:FindFirstChild("NPC Zones"), WS:FindFirstChild("Npc_Workspace")}
+                    local questGiversF = WS:FindFirstChild("Npc_Workspace") and WS.Npc_Workspace:FindFirstChild("QuestGivers")
+                    for _, f in ipairs(checkFolders) do
+                        if f then
+                            for _, m in ipairs(f:GetDescendants()) do
+                                if questGiversF and m:IsDescendantOf(questGiversF) then continue end
+                                if m:IsA("Model") and m ~= char then
+                                    local hum = m:FindFirstChild("Humanoid")
+                                    local mRoot = m:FindFirstChild("HumanoidRootPart")
+                                    if hum and mRoot and hum.Health > 0 and hum.MaxHealth > 0 then
+                                        local d = (charRoot.Position - mRoot.Position).Magnitude
+                                        if d < dist then
+                                            dist = d
+                                            nearest = m
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                targetMob = nearest
+            end
+
             local keyMap = {
                 Z="Z", X="X", C="C", V="V", Q="Q", E="E",
                 R="R", F="F", G="G", T="T",
@@ -1496,13 +1569,25 @@ local function doCombatFeatures()
                 local enumName = keyMap[k]
                 local keyCode = enumName and Enum.KeyCode[enumName]
                 if keyCode then
+                    -- Auto-Aim: Warp the mouse to the mob's screen position right before casting
+                    if targetMob and targetMob:FindFirstChild("HumanoidRootPart") then
+                        local camera = workspace.CurrentCamera
+                        if camera then
+                            local screenPos, onScreen = camera:WorldToScreenPoint(targetMob.HumanoidRootPart.Position)
+                            if onScreen then
+                                VIM:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
+                            end
+                        end
+                    end
+                    
                     VIM:SendKeyEvent(true,  keyCode, false, game)
                     task.wait(0.05)
                     VIM:SendKeyEvent(false, keyCode, false, game)
-                    task.wait(0.05)
+                    task.wait(0.12) -- grace delay for the game to register mouse aim direction
                 end
             end
         end
+
     end
 
 

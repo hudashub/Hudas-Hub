@@ -35,7 +35,9 @@ local State = {
     FarmDistance = 7,
     AutoSkills = false,
     SkillKeys = {}, -- keys selected for auto skills e.g. {"Z","X","C"}
+    AutoStatsTarget = "None",
 }
+
 local currentTargetMob = nil -- persists chosen mob until it dies
 local _bodyPos = nil          -- BodyPosition used for smooth mob attachment
 
@@ -1130,7 +1132,8 @@ local function doAutoFarmStep()
                 if tg and tg.Enabled then
                     local mf3 = tg:FindFirstChild("MainFrame")
                     local fr3 = mf3 and mf3:FindFirstChild("Frame")
-                    local cb3 = fr3 and (fr3:FindFirstChild("CloseButton") or fr3:FindFirstChild("Skip"))
+                    -- Support Next/Ok buttons in addition to CloseButton/Skip
+                    local cb3 = fr3 and (fr3:FindFirstChild("CloseButton") or fr3:FindFirstChild("Skip") or fr3:FindFirstChild("Next") or fr3:FindFirstChild("Ok"))
                     if cb3 then
                         pcall(function()
                             for _, c in ipairs(getconnections(cb3.MouseButton1Click)) do c:Fire() end
@@ -1140,8 +1143,9 @@ local function doAutoFarmStep()
                     end
                 end
 
-                -- Only fire prompt if cooldown has passed (prevents re-talk after accept)
-                if tick() - lastQuestAccept > 8 then
+                -- Only fire prompt if quest dialogue is NOT already open and cooldown has passed
+                local tutorialGuiOpen = player.PlayerGui:FindFirstChild("Tutorial_Gui") and player.PlayerGui.Tutorial_Gui.Enabled
+                if not tutorialGuiOpen and tick() - lastQuestAccept > 3 then
                     local prompt = npcModel:FindFirstChild("Clicker")
                         and npcModel.Clicker:FindFirstChildWhichIsA("ProximityPrompt")
                     if prompt then
@@ -1151,6 +1155,7 @@ local function doAutoFarmStep()
                     end
                 end
                 return
+
             end
         end
     end
@@ -1458,6 +1463,10 @@ end))
 currentCol = setCol1
 section("General Helpers")
 toggle("⚡", "Anti-AFK Helper", function(v) State.AntiAFK = v end, "AntiAFK")
+dropdown("Auto Stats Target", {"None", "Combat", "Defense", "Sword", "Fruit"}, function(v) return State.AutoStatsTarget == v end, function(v, on)
+    if on then State.AutoStatsTarget = v end
+end, "AutoStatsTarget")
+
 
 currentCol = setCol2
 section("Unload System")
@@ -1555,5 +1564,25 @@ startAntiAFK()
 MF.Size = UDim2.new(0,0,0,0)
 MF.Position = UDim2.new(0.5, 0, 0.5, 0)
 TweenService:Create(MF, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())}):Play()
+
+-- Auto Stats point allocation loop
+trackThread(task.spawn(function()
+    while true do
+        if State.AutoStatsTarget and State.AutoStatsTarget ~= "None" then
+            local pdVal = player:FindFirstChild("PlayerData")
+            local expVal = pdVal and pdVal:FindFirstChild("Experience")
+            local ptsVal = expVal and expVal:FindFirstChild("Points")
+            if ptsVal and ptsVal.Value > 0 then
+                local sEvt = RS:FindFirstChild("Replication")
+                    and RS.Replication:FindFirstChild("ClientEvents")
+                    and RS.Replication.ClientEvents:FindFirstChild("Stats_Event")
+                if sEvt then
+                    sEvt:FireServer(State.AutoStatsTarget)
+                end
+            end
+        end
+        task.wait(0.4)
+    end
+end))
 
 warn("[Haze Seas Hub] Premium Hudas Hub Script Loaded!")

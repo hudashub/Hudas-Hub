@@ -952,6 +952,8 @@ local highestQ = nil
 local lastTimeHadQuest = tick()
 local lastTargetName = nil
 local lastQuestCompletedTime = 0
+local needQuest = false
+
 
 
 local function doAutoFarmStep()
@@ -1028,7 +1030,8 @@ local function doAutoFarmStep()
     end
 
     -- 1. Check if we need to accept a higher quest or if quest is done
-    local needQuest = false
+    needQuest = false
+
 
     if highestQ then
         if activeQ then
@@ -1176,8 +1179,10 @@ local function doAutoFarmStep()
                                             for _, conn in ipairs(getconnections(button.MouseButton1Down))  do conn:Fire() end
                                             for _, conn in ipairs(getconnections(button.Activated))         do conn:Fire() end
                                         end)
+                                        lastQuestAccept = tick() -- Reset talk debounce immediately upon acceptance to prevent re-talking!
                                         task.wait(0.2)
                                         return
+
                                     end
                                 end
                             end
@@ -1447,8 +1452,13 @@ end
 
 
 local function doCombatFeatures()
+    if State.AutoFarmLevel and needQuest then
+        return
+    end
+
     local char = player.Character
     if not char then return end
+
 
     -- Auto Weapon
     if State.SelectedWeapon and State.SelectedWeapon ~= "None" then

@@ -397,7 +397,7 @@ end
 -- ─── WEAPON MODIFIERS (RECOIL, INSTANT RELOAD, INF AMMO & DURA) ───
 trackThread(task.spawn(function()
     while true do
-        if myLoopID ~= _G.TWDOLoopID do break end
+        if myLoopID ~= _G.TWDOLoopID then break end
         
         -- High-frequency stamina & speed enforcement + blur removal
         pcall(function()
@@ -1238,7 +1238,21 @@ SG.Name = "TWDOHub"
 SG.ResetOnSpawn = false
 SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 SG.IgnoreGuiInset = true
-SG.Parent = player.PlayerGui
+
+local parentGui = nil
+if gethui then
+    pcall(function() parentGui = gethui() end)
+end
+if not parentGui then
+    pcall(function()
+        if syn and syn.protect_gui then syn.protect_gui(SG) end
+        parentGui = game:GetService("CoreGui")
+    end)
+end
+if not parentGui then
+    pcall(function() parentGui = player:WaitForChild("PlayerGui") end)
+end
+SG.Parent = parentGui or player.PlayerGui
 
 local oldCleanup = _G.__TWDO_CLEANUP
 _G.__TWDO_CLEANUP = function()
@@ -1732,6 +1746,12 @@ track(UserInputService.InputEnded:Connect(function(i)
     if fDrag and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
         fDrag = false
         if not fMoved then MF.Visible = not MF.Visible end
+    end
+end))
+
+track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and (input.KeyCode == Enum.KeyCode.Insert or input.KeyCode == Enum.KeyCode.RightControl) then
+        MF.Visible = not MF.Visible
     end
 end))
 

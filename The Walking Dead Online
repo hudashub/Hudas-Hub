@@ -1230,7 +1230,6 @@ end)
         end)
         _G.TWDO_OriginalTweenCreate = oldTweenCreate
     end
-end)
 
 -- ─── UI ELEMENTS & HUDAS HUB DARK THEME ────────────────────────────
 local SG = Instance.new("ScreenGui")

@@ -130,12 +130,15 @@ _G.__TWDO_CLEANUP = function()
         pcall(function() task.cancel(t) end)
     end
     for _, c in ipairs(lootEspConnections) do pcall(function() c:Disconnect() end) end
+    for _, c in ipairs(vehicleEspConnections) do pcall(function() c:Disconnect() end) end
     
     lootEspConnections = {}
+    vehicleEspConnections = {}
     
     cleanAllEsp()
     cleanAllWalkerEsp()
     cleanAllLootEsp()
+    cleanAllVehicleEsp()
     restoreHeadSizes()
     
     pcall(_G.restoreGodMode)
@@ -167,6 +170,12 @@ local State = {
     -- Loot & Corpse ESP
     LootESP = false,
     LootDistance = 300,
+    
+    -- Vehicle & Mount ESP
+    VehicleESP = false,
+    VehicleShowCars = true,
+    VehicleShowHorses = true,
+    VehicleDistance = 1000,
     
     -- Silent Aim & Hitbox
     SilentAimActive = false,
@@ -485,7 +494,35 @@ local processedGunModules = setmetatable({}, {__mode = "k"})
                 for _, item in ipairs(char:GetDescendants()) do
                     pcall(modifyConfig, item)
                 end
+local maxMagTable = {
+    BerretaM9 = 15, Glock17 = 17, ["Colt Python"] = 6, M1911 = 7, ["USP .45"] = 12, ["FN Five-seveN"] = 20, ["Desert Eagle"] = 7,
+    Model77E = 7, ["Remington 870"] = 7, MP5 = 30, ["HK UMP-45"] = 25, ["Ruger 10/22"] = 10, ["AKS-74U"] = 30, ["Steyr AUG"] = 30,
+    M16 = 30, AR15 = 30, AK47 = 30, SKS = 10, SVD = 10, Kar98K = 5, ["FN FAL"] = 20, ["SCAR H"] = 20, ["VSS Vintorez"] = 10, M40 = 5, M82A1 = 10
+}
+
                 if State.InfAmmoDurability then
+                    pcall(function()
+                        local dataClientMod = RS:FindFirstChild("CLIENT_MODULES") and RS.CLIENT_MODULES:FindFirstChild("DataClient")
+                        if dataClientMod then
+                            local dc = require(dataClientMod)
+                            if dc and dc.Table and dc.Table.InventoryData then
+                                for id, itemData in pairs(dc.Table.InventoryData) do
+                                    if type(itemData) == "table" then
+                                        if itemData.Type == "Gun" then
+                                            itemData.Durability = 100
+                                            local realMax = maxMagTable[itemData.ItemName]
+                                            if not realMax and ItemDataModule and ItemDataModule[itemData.ItemName] then
+                                                realMax = ItemDataModule[itemData.ItemName].MaxAmmo or ItemDataModule[itemData.ItemName].ClipSize or 30
+                                            end
+                                            itemData.Ammo = realMax or 30
+                                        elseif itemData.Type == "Ammo" then
+                                            itemData.Amt = 99
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end)
                     for _, tool in ipairs(player.Backpack:GetChildren()) do
                         if tool:IsA("Tool") then
                             if tool:GetAttribute("Durability") then tool:SetAttribute("Durability", 100) end
@@ -946,8 +983,7 @@ local function startLootEspLoop()
         workspace:FindFirstChild("ItemDrops"),
         workspace:FindFirstChild("PhysicalLoot"),
         workspace:FindFirstChild("Lootables"),
-        workspace:FindFirstChild("Corpses"),
-        workspace
+        workspace:FindFirstChild("Corpses")
     }
     
     for _, folder in ipairs(scanFolders) do
@@ -1015,6 +1051,170 @@ local function startLootEspLoop()
         end
     end)
     trackThread(lootThread)
+end
+
+-- ─── VEHICLE & MOUNT (HORSE) ESP SYSTEM ─────────────────────────────
+local VehicleEspInstances = setmetatable({}, {__mode = "k"})
+
+local function cleanVehicleEsp(obj)
+    if VehicleEspInstances[obj] then
+        for _, inst in ipairs(VehicleEspInstances[obj]) do
+            pcall(function() inst:Destroy() end)
+        end
+        VehicleEspInstances[obj] = nil
+    end
+end
+
+local function cleanAllVehicleEsp()
+    for obj, _ in pairs(VehicleEspInstances) do
+        cleanVehicleEsp(obj)
+    end
+end
+
+local function applyVehicleEsp(obj, isHorse, displayName)
+    cleanVehicleEsp(obj)
+    
+    local adorneePart = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("VehicleSeat", true) or obj:FindFirstChildWhichIsA("Seat", true) or obj:FindFirstChildWhichIsA("BasePart", true)) or obj
+    if not adorneePart then return end
+    
+    local instances = {}
+    
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "VehicleBillboard"
+    billboard.Adornee = adorneePart
+    billboard.Size = UDim2.new(0, 160, 0, 32)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = false
+    
+    local label = Instance.new("TextLabel", billboard)
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = isHorse and Color3.fromRGB(245, 180, 50) or Color3.fromRGB(60, 200, 245)
+    label.TextStrokeTransparency = 0.2
+    label.TextStrokeColor3 = Color3.fromRGB(10, 10, 14)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 11
+    label.Text = displayName
+    
+    billboard.Parent = obj
+    table.insert(instances, billboard)
+    
+    VehicleEspInstances[obj] = instances
+end
+
+local vehicleEspThread = nil
+local vehicleEspConnections = {}
+
+local function startVehicleEspLoop()
+    for _, c in ipairs(vehicleEspConnections) do pcall(function() c:Disconnect() end) end
+    vehicleEspConnections = {}
+    
+    if vehicleEspThread then
+        pcall(function() task.cancel(vehicleEspThread) end)
+        vehicleEspThread = nil
+    end
+    
+    if not State.VehicleESP then
+        cleanAllVehicleEsp()
+        return
+    end
+    
+    local function checkVehicleOrHorse(obj)
+        if not obj or not obj:IsA("Model") or not obj:IsDescendantOf(workspace) or VehicleEspInstances[obj] then return end
+        
+        local isCar = false
+        local isHorse = false
+        local name = obj.Name
+        
+        if State.VehicleShowCars ~= false then
+            if obj:FindFirstChildWhichIsA("VehicleSeat", true) or obj:FindFirstChild("DriveSeat", true) or obj:FindFirstChild("DriverSeat", true) then
+                isCar = true
+            end
+        end
+        
+        if State.VehicleShowHorses ~= false and not isCar then
+            local lower = name:lower()
+            if lower:match("horse") or lower:match("mount") or lower:match("steed") or lower:match("pinto") or lower:match("stallion") or lower:match("mare") then
+                isHorse = true
+            end
+        end
+        
+        if isCar or isHorse then
+            local tag = isHorse and "🐎 Horse" or ("🚗 " .. name)
+            applyVehicleEsp(obj, isHorse, tag)
+        end
+    end
+    
+    -- Targeted Initial Scan (NO GetDescendants on entire Workspace)
+    local scanTargets = {
+        workspace,
+        workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Wildlife"),
+        workspace:FindFirstChild("Vehicles"),
+        workspace:FindFirstChild("Cars"),
+        workspace:FindFirstChild("CarSpawns")
+    }
+    
+    for _, container in ipairs(scanTargets) do
+        if container then
+            for _, child in ipairs(container:GetChildren()) do
+                pcall(checkVehicleOrHorse, child)
+            end
+            local conn = container.ChildAdded:Connect(function(child)
+                pcall(checkVehicleOrHorse, child)
+            end)
+            table.insert(vehicleEspConnections, conn)
+            track(conn)
+        end
+    end
+    
+    vehicleEspThread = task.spawn(function()
+        while State.VehicleESP and myLoopID == _G.TWDOLoopID do
+            pcall(function()
+                local char = player.Character
+                local myPos = char and char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame.Position)
+                local maxDist = State.VehicleDistance or 1000
+                
+                local toProcess = {}
+                for obj, insts in pairs(VehicleEspInstances) do
+                    table.insert(toProcess, {obj = obj, insts = insts})
+                end
+                
+                for idx, item in ipairs(toProcess) do
+                    if idx % 15 == 0 then task.wait() end
+                    if not State.VehicleESP then break end
+                    
+                    local obj = item.obj
+                    local insts = item.insts
+                    
+                    if not obj or not obj.Parent then
+                        cleanVehicleEsp(obj)
+                    else
+                        local adornee = insts[1] and insts[1].Adornee
+                        if adornee and adornee:IsDescendantOf(workspace) and myPos then
+                            local dist = math.floor((adornee.Position - myPos).Magnitude)
+                            if dist <= maxDist then
+                                local label = insts[1]:FindFirstChildWhichIsA("TextLabel")
+                                if label then
+                                    local lowerName = obj.Name:lower()
+                                    local isHorse = lowerName:match("horse") or lowerName:match("mount")
+                                    local prefix = isHorse and "🐎 Horse" or ("🚗 " .. obj.Name)
+                                    label.Text = prefix .. " • " .. dist .. "m"
+                                end
+                                insts[1].Enabled = true
+                            else
+                                insts[1].Enabled = false
+                            end
+                        else
+                            insts[1].Enabled = false
+                        end
+                    end
+                end
+            end)
+            task.wait(0.5)
+        end
+    end)
+    trackThread(vehicleEspThread)
 end
 
 -- ─── SILENT AIM SYSTEM ─────────────────────────────────────────────
@@ -1134,12 +1334,10 @@ pcall(function()
             local state = _G.TWDO_State
             if state and state.SilentAimActive and not checkcaller() then
                 if self == Mouse and (key == "Hit" or key == "Target") then
-                    if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
-                        local targetPart = _G.TWDO_SilentAimTarget
-                        if targetPart then
-                            if key == "Hit" then return targetPart.CFrame
-                            elseif key == "Target" then return targetPart end
-                        end
+                    local targetPart = _G.TWDO_SilentAimTarget
+                    if targetPart and targetPart.Parent then
+                        if key == "Hit" then return targetPart.CFrame
+                        elseif key == "Target" then return targetPart end
                     end
                 end
             end
@@ -1151,6 +1349,60 @@ pcall(function()
         if oldIndex then
             _G.TWDO_OriginalIndex = oldIndex
             _G.OriginalIndex = oldIndex
+        end
+    end
+    
+    if not _G.TWDO_OriginalNamecall then
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            local state = _G.TWDO_State
+            
+            if state and state.SilentAimActive and not checkcaller() then
+                local targetPart = _G.TWDO_SilentAimTarget
+                if targetPart and targetPart.Parent then
+                    if method == "Raycast" or method == "raycast" then
+                        local args = {...}
+                        local origin = args[1]
+                        if typeof(origin) == "Vector3" then
+                            args[2] = (targetPart.Position - origin).Unit * 5000
+                            return oldNamecall(self, unpack(args))
+                        end
+                    end
+                    
+                    if method == "FindPartOnWithIgnoreList" or method == "FindPartOnWithRay" or method == "findPartOnWithIgnoreList" then
+                        local args = {...}
+                        local ray = args[1]
+                        if typeof(ray) == "Ray" then
+                            args[1] = Ray.new(ray.Origin, (targetPart.Position - ray.Origin).Unit * 5000)
+                            return oldNamecall(self, unpack(args))
+                        end
+                    end
+                    
+                    if method == "FireServer" and (self.Name == "Fire" or self.Name == "Hit") then
+                        local args = {...}
+                        for i, arg in ipairs(args) do
+                            if typeof(arg) == "Vector3" then
+                                args[i] = targetPart.Position
+                            elseif typeof(arg) == "CFrame" then
+                                args[i] = targetPart.CFrame
+                            elseif typeof(arg) == "Instance" and arg:IsA("BasePart") then
+                                args[i] = targetPart
+                            end
+                        end
+                        return oldNamecall(self, unpack(args))
+                    end
+                end
+            end
+            
+            if oldNamecall then
+                return oldNamecall(self, ...)
+            end
+            return self[method](self, ...)
+        end)
+        if oldNamecall then
+            _G.TWDO_OriginalNamecall = oldNamecall
+            _G.OriginalNamecall = oldNamecall
         end
     end
     
@@ -1643,10 +1895,6 @@ dropdown("Target Hitbox", {"Head", "Body", "Legs"}, function() return State.Sile
 slider("Silent Aim FOV", 50, 500, 150, function(v) State.SilentAimFOV = v end)
 toggle("⭕", "Show FOV Circle", function(v) State.ShowFOVCircle = v end, "ShowFOVCircle")
 
-section("Hitbox Expander")
-toggle("🧠", "Headshot Hitbox Expander", function(v) State.HitboxExpander = v; startHitboxExpanderLoop() end, "HitboxExpander")
-slider("Head Hitbox Size", 2, 12, 5, function(v) State.HitboxSize = v end)
-
 section("Weapon & Movement Modifiers")
 toggle("🔫", "No Recoil & Zero Spread", function(v) State.NoRecoilSpread = v end, "NoRecoilSpread")
 toggle("⚡", "Instant Reload (Normal RPM)", function(v) State.InstantReload = v end, "InstantReload")
@@ -1673,6 +1921,12 @@ slider("Walker ESP Max Distance", 50, 1500, 300, function(v) State.WalkerDistanc
 section("Loot & Corpse Visuals")
 toggle("📦", "Loot & Corpse ESP", function(v) State.LootESP = v; startLootEspLoop() end, "LootESP")
 slider("Loot ESP Max Distance", 50, 1500, 300, function(v) State.LootDistance = v end)
+
+section("Vehicle & Mount Visuals")
+toggle("🚗", "Vehicle & Horse ESP", function(v) State.VehicleESP = v; startVehicleEspLoop() end, "VehicleESP")
+toggle("🚙", "Show Cars & Trucks", function(v) State.VehicleShowCars = v end, "VehicleShowCars")
+toggle("🐎", "Show Horses & Mounts", function(v) State.VehicleShowHorses = v end, "VehicleShowHorses")
+slider("Vehicle ESP Max Distance", 100, 5000, 1000, function(v) State.VehicleDistance = v end)
 
 -- ─── POPULATE SETTINGS & AUTOMATION TAB ────────────────────────────
 currentCol = setCol

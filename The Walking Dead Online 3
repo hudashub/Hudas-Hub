@@ -1,0 +1,1744 @@
+-- ═══════════════════════════════════════════════════════════════════
+--  TWDO SCRIPT - The Walking Dead Online 3 [BETA]
+--  Optimized Zero-Memory-Leak Architecture with Hudas Hub Dark Theme UI
+-- ═══════════════════════════════════════════════════════════════════
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RS               = game:GetService("ReplicatedStorage")
+local WS               = game:GetService("Workspace")
+local VR               = game:GetService("VirtualUser")
+
+if _G.__TWDO_CLEANUP then pcall(_G.__TWDO_CLEANUP) end
+_G.TWDOLoopID = (_G.TWDOLoopID or 0) + 1
+local myLoopID = _G.TWDOLoopID
+
+-- ─── ZERO-LEAK SIGNAL & THREAD TRACKING ────────────────────────────
+local _CONNS = setmetatable({}, {__mode = "k"})
+local _THREADS = {}
+
+local function track(conn)
+    if conn then _CONNS[conn] = true end
+    return conn
+end
+
+local function untrack(conn)
+    if conn then
+        pcall(function() conn:Disconnect() end)
+        _CONNS[conn] = nil
+    end
+end
+
+local function trackThread(t)
+    table.insert(_THREADS, t)
+    return t
+end
+
+-- Weak-key metatables prevent memory leaks when Instances despawn or unstream
+local WalkerEspInstances = setmetatable({}, {__mode = "k"})
+local LootEspInstances   = setmetatable({}, {__mode = "k"})
+local originalHeadSizes  = setmetatable({}, {__mode = "k"})
+
+local lootEspConnections = {}
+local fovCircleGui
+
+local function cleanEspForWalker(obj)
+    if WalkerEspInstances[obj] then
+        for _, inst in ipairs(WalkerEspInstances[obj]) do
+            pcall(function() inst:Destroy() end)
+        end
+        WalkerEspInstances[obj] = nil
+    end
+end
+
+local function cleanAllWalkerEsp()
+    for obj, _ in pairs(WalkerEspInstances) do
+        cleanEspForWalker(obj)
+    end
+end
+
+local function cleanLootEsp(obj)
+    if LootEspInstances[obj] then
+        for _, inst in ipairs(LootEspInstances[obj]) do
+            pcall(function() inst:Destroy() end)
+        end
+        LootEspInstances[obj] = nil
+    end
+end
+
+local function cleanAllLootEsp()
+    for obj, _ in pairs(LootEspInstances) do
+        cleanAllLootEsp(obj)
+    end
+end
+
+-- Centralized Player ESP Data
+local PlayerEspGuis = {}
+
+local function cleanEspForPlayer(p)
+    local guiData = PlayerEspGuis[p]
+    if guiData then
+        pcall(function() if guiData.Highlight then guiData.Highlight:Destroy() end end)
+        pcall(function() if guiData.Billboard then guiData.Billboard:Destroy() end end)
+        PlayerEspGuis[p] = nil
+    end
+end
+
+local function cleanAllEsp()
+    for p, _ in pairs(PlayerEspGuis) do
+        cleanEspForPlayer(p)
+    end
+    PlayerEspGuis = {}
+end
+
+local playerEspRenderConn = nil
+local walkerThread = nil
+local lootThread = nil
+local hitboxThread = nil
+local autoSurvivalThread = nil
+local vehicleThread = nil
+local animConn = nil
+
+local function restoreHeadSizes()
+    for head, origSize in pairs(originalHeadSizes) do
+        if head and head.Parent then
+            pcall(function()
+                head.Size = origSize
+                head.CanCollide = true
+                head.Transparency = 0
+            end)
+        end
+    end
+    originalHeadSizes = setmetatable({}, {__mode = "k"})
+end
+
+_G.__TWDO_CLEANUP = function()
+    if playerEspRenderConn then untrack(playerEspRenderConn); playerEspRenderConn = nil end
+    if walkerThread then pcall(function() task.cancel(walkerThread) end); walkerThread = nil end
+    if lootThread then pcall(function() task.cancel(lootThread) end); lootThread = nil end
+    if hitboxThread then pcall(function() task.cancel(hitboxThread) end); hitboxThread = nil end
+    if autoSurvivalThread then pcall(function() task.cancel(autoSurvivalThread) end); autoSurvivalThread = nil end
+    if vehicleThread then pcall(function() task.cancel(vehicleThread) end); vehicleThread = nil end
+    if animConn then untrack(animConn); animConn = nil end
+    
+    for conn, _ in pairs(_CONNS) do
+        pcall(function() conn:Disconnect() end)
+    end
+    for _, t in ipairs(_THREADS) do
+        pcall(function() task.cancel(t) end)
+    end
+    for _, c in ipairs(lootEspConnections) do pcall(function() c:Disconnect() end) end
+    
+    lootEspConnections = {}
+    
+    cleanAllEsp()
+    cleanAllWalkerEsp()
+    cleanAllLootEsp()
+    restoreHeadSizes()
+    
+    pcall(_G.restoreGodMode)
+    if fovCircleGui then
+        pcall(function() fovCircleGui:Destroy() end)
+    end
+    _CONNS = setmetatable({}, {__mode = "k"})
+    _THREADS = {}
+end
+
+local player = Players.LocalPlayer
+
+local State = {
+    AntiAFK = true,
+    
+    -- Player ESP & Clean Design Controls
+    PlayerESP = false,
+    ESPOnlyVisible = false,
+    ESPDistance = 1000,
+    ESPShowName = true,
+    ESPShowHealth = true,
+    ESPShowDistance = true,
+    ESPShowArmor = false,
+    
+    -- Walker / Zombie ESP
+    WalkerESP = false,
+    WalkerDistance = 300,
+    
+    -- Loot & Corpse ESP
+    LootESP = false,
+    LootDistance = 300,
+    
+    -- Silent Aim & Hitbox
+    SilentAimActive = false,
+    SilentAimTargetType = "Walkers", -- "Walkers", "Players", "Both"
+    SilentAimPart = "Head",
+    SilentAimFOV = 150,
+    ShowFOVCircle = true,
+    
+    HitboxExpander = false,
+    HitboxSize = 5,
+    
+    -- Weapon & Movement
+    NoRecoilSpread = false,
+    InstantReload = false,
+    InfAmmoDurability = false,
+    InfStamina = false,
+    Noclip = false,
+    GodMode = false,
+    
+    -- Auto Survival & Vehicle
+    AutoHealEatDrink = false,
+    HealthThreshold = 60,
+    HungerThirstThreshold = 50,
+    AutoFillVehicle = false,
+}
+
+-- Shared RaycastParams to eliminate garbage allocation per frame
+local sharedRaycastParams = RaycastParams.new()
+sharedRaycastParams.FilterType = Enum.RaycastFilterType.Exclude
+sharedRaycastParams.IgnoreWater = true
+
+-- Anti-AFK
+local function startAntiAFK()
+    local connection = player.Idled:Connect(function()
+        if State.AntiAFK then
+            VR:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+            task.wait(1)
+            VR:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        end
+    end)
+    track(connection)
+end
+
+-- Cache ItemData Module once to avoid requiring every frame
+local ItemDataModule = nil
+pcall(function()
+    local modules = RS:FindFirstChild("CLIENT_MODULES")
+    local itemDataMod = modules and modules:FindFirstChild("ItemData")
+    if itemDataMod then ItemDataModule = require(itemDataMod) end
+end)
+
+-- ─── INSTANT ANIMATION SUPPRESSOR FOR AUTO HEAL / EAT / DRINK ───────
+local function setupAnimationSuppressor(char)
+    if animConn then untrack(animConn); animConn = nil end
+    if not char then return end
+    
+    local humanoid = char:WaitForChild("Humanoid", 3)
+    if humanoid then
+        animConn = humanoid.AnimationPlayed:Connect(function(trackAnim)
+            if State.AutoHealEatDrink then
+                local animName = trackAnim.Name:lower()
+                if animName:match("eat") or animName:match("drink") or animName:match("heal") or animName:match("bandage") or animName:match("med") or animName:match("consume") or animName:match("use") then
+                    pcall(function() trackAnim:Stop(0) end)
+                end
+            end
+        end)
+        track(animConn)
+    end
+end
+
+if player.Character then setupAnimationSuppressor(player.Character) end
+track(player.CharacterAdded:Connect(setupAnimationSuppressor))
+
+-- ─── HEADSHOT HITBOX EXPANDED SYSTEM ────────────────────────────────
+local function startHitboxExpanderLoop()
+    if hitboxThread then
+        pcall(function() task.cancel(hitboxThread) end)
+        hitboxThread = nil
+    end
+    
+    if not State.HitboxExpander then
+        restoreHeadSizes()
+        return
+    end
+    
+    hitboxThread = task.spawn(function()
+        while State.HitboxExpander and myLoopID == _G.TWDOLoopID do
+            pcall(function()
+                local targets = {}
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= player and p.Character then table.insert(targets, p.Character) end
+                end
+                
+                local walkerFolders = {
+                    workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Walkers"),
+                    workspace:FindFirstChild("PresetWalkers")
+                }
+                for _, folder in ipairs(walkerFolders) do
+                    if folder then
+                        for _, w in ipairs(folder:GetChildren()) do
+                            if w:IsA("Model") then table.insert(targets, w) end
+                        end
+                    end
+                end
+                
+                local targetSize = Vector3.new(State.HitboxSize or 5, State.HitboxSize or 5, State.HitboxSize or 5)
+                
+                for _, model in ipairs(targets) do
+                    local hum = model:FindFirstChild("Humanoid")
+                    local head = model:FindFirstChild("Head")
+                    if hum and hum.Health > 0 and head and head:IsA("BasePart") then
+                        if not originalHeadSizes[head] then
+                            originalHeadSizes[head] = head.Size
+                        end
+                        head.Size = targetSize
+                        head.CanCollide = false
+                        head.Transparency = 0.6
+                    end
+                end
+            end)
+            task.wait(0.5)
+        end
+    end)
+    trackThread(hitboxThread)
+end
+
+-- ─── AUTO SURVIVAL LOOP (EAT, DRINK, HEAL - ZERO ANIMATION) ─────────
+local function startAutoSurvivalLoop()
+    if autoSurvivalThread then
+        pcall(function() task.cancel(autoSurvivalThread) end)
+        autoSurvivalThread = nil
+    end
+    
+    if not State.AutoHealEatDrink then return end
+    
+    autoSurvivalThread = task.spawn(function()
+        while State.AutoHealEatDrink and myLoopID == _G.TWDOLoopID do
+            pcall(function()
+                local char = player.Character
+                local hum = char and char:FindFirstChild("Humanoid")
+                if hum and hum.Health > 0 then
+                    local clientRemotes = RS:FindFirstChild("CLIENT_REMOTES")
+                    local healRemote = clientRemotes and clientRemotes:FindFirstChild("Heal")
+                    
+                    -- Check Health Threshold
+                    if hum.Health < (State.HealthThreshold or 60) then
+                        for _, item in ipairs(player.Backpack:GetChildren()) do
+                            if item:IsA("Tool") then
+                                local lowerName = item.Name:lower()
+                                if lowerName:match("bandage") or lowerName:match("med") or lowerName:match("firstaid") or lowerName:match("heal") or lowerName:match("blood") then
+                                    if healRemote then
+                                        healRemote:FireServer(item)
+                                    else
+                                        hum.Health = math.min(hum.MaxHealth, hum.Health + 35)
+                                        item:Destroy()
+                                    end
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    
+                    -- Check Hunger & Thirst Attributes
+                    local hunger = char:GetAttribute("Hunger") or player:GetAttribute("Hunger") or 100
+                    local thirst = char:GetAttribute("Thirst") or player:GetAttribute("Thirst") or 100
+                    
+                    if hunger < (State.HungerThirstThreshold or 50) or thirst < (State.HungerThirstThreshold or 50) then
+                        for _, item in ipairs(player.Backpack:GetChildren()) do
+                            if item:IsA("Tool") then
+                                local lowerName = item.Name:lower()
+                                local isFood = lowerName:match("can") or lowerName:match("food") or lowerName:match("meat") or lowerName:match("apple") or lowerName:match("ration")
+                                local isDrink = lowerName:match("water") or lowerName:match("drink") or lowerName:match("soda") or lowerName:match("bottle") or lowerName:match("canteen")
+                                
+                                if isFood or isDrink then
+                                    if char:GetAttribute("Hunger") then char:SetAttribute("Hunger", 100) end
+                                    if player:GetAttribute("Hunger") then player:SetAttribute("Hunger", 100) end
+                                    if char:GetAttribute("Thirst") then char:SetAttribute("Thirst", 100) end
+                                    if player:GetAttribute("Thirst") then player:SetAttribute("Thirst", 100) end
+                                    item:Destroy()
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(1.5)
+        end
+    end)
+    trackThread(autoSurvivalThread)
+end
+
+-- ─── AUTO VEHICLE REFILL LOOP (SPEED UNTOUCHED) ────────────────────
+local function startVehicleRefillLoop()
+    if vehicleThread then
+        pcall(function() task.cancel(vehicleThread) end)
+        vehicleThread = nil
+    end
+    
+    if not State.AutoFillVehicle then return end
+    
+    vehicleThread = task.spawn(function()
+        while State.AutoFillVehicle and myLoopID == _G.TWDOLoopID do
+            pcall(function()
+                local clientRemotes = RS:FindFirstChild("CLIENT_REMOTES")
+                local pumpGas = clientRemotes and clientRemotes:FindFirstChild("PumpGas")
+                local fillCar = clientRemotes and clientRemotes:FindFirstChild("FillCar")
+                
+                local char = player.Character
+                local hum = char and char:FindFirstChild("Humanoid")
+                local seat = hum and hum.SeatPart
+                local vehicle = seat and seat:FindFirstAncestorWhichIsA("Model")
+                
+                if vehicle then
+                    if fillCar then fillCar:FireServer(vehicle) end
+                    if pumpGas then pumpGas:FireServer(vehicle) end
+                    
+                    if vehicle:GetAttribute("Fuel") then vehicle:SetAttribute("Fuel", 100) end
+                    if vehicle:GetAttribute("Gas") then vehicle:SetAttribute("Gas", 100) end
+                end
+            end)
+            task.wait(2.0)
+        end
+    end)
+    trackThread(vehicleThread)
+end
+
+-- ─── WEAPON MODIFIERS (RECOIL, INSTANT RELOAD, INF AMMO & DURA) ───
+trackThread(task.spawn(function()
+    while true do
+        if myLoopID ~= _G.TWDOLoopID do break end
+        
+        -- High-frequency stamina & speed enforcement + blur removal
+        pcall(function()
+            if State.InfStamina then
+                local char = player.Character
+                if char then
+                    local hum = char:FindFirstChild("Humanoid")
+                    if hum and hum.WalkSpeed < 23 then
+                        hum.WalkSpeed = 23
+                    end
+                    local stam = char:FindFirstChild("Stamina") or char:FindFirstChild("Sprint")
+                    if stam and stam:IsA("ValueObject") then
+                        stam.Value = stam.MaxValue or 100
+                    end
+                    if char:GetAttribute("Stamina") then
+                        char:SetAttribute("Stamina", 100)
+                    end
+                end
+                if player:GetAttribute("Stamina") then
+                    player:SetAttribute("Stamina", 100)
+                end
+                
+                -- Neutralize StaminaBlur, CharBlur, and StaminaVignette
+                local lighting = game:GetService("Lighting")
+                local sBlur = lighting:FindFirstChild("StaminaBlur")
+                if sBlur then sBlur.Enabled = false; sBlur.Size = 0 end
+                local cBlur = lighting:FindFirstChild("CharBlur")
+                if cBlur then cBlur.Enabled = false; cBlur.Size = 0 end
+                
+                local userGui = player.PlayerGui:FindFirstChild("UserGUI")
+                local sVignette = userGui and userGui:FindFirstChild("StaminaVignette")
+                if sVignette then sVignette.ImageTransparency = 1; sVignette.Visible = false end
+            end
+        end)
+        
+local processedGunModules = setmetatable({}, {__mode = "k"})
+
+        -- Zeroing out gun config tables in backpack and character
+        pcall(function()
+            local function modifyConfig(inst)
+                if inst:IsA("ModuleScript") and not processedGunModules[inst] and (inst.Name:lower():match("config") or inst.Name:lower():match("setting") or inst.Name:lower():match("gun")) then
+                    processedGunModules[inst] = true
+                    local config = require(inst)
+                    if type(config) == "table" then
+                        if State.NoRecoilSpread then
+                            if config.Recoil then config.Recoil = 0 end
+                            if config.Spread then config.Spread = 0 end
+                            if config.MinSpread then config.MinSpread = 0 end
+                            if config.MaxSpread then config.MaxSpread = 0 end
+                            if config.SpreadAngle then config.SpreadAngle = 0 end
+                            if config.ADSSpreadAngle then config.ADSSpreadAngle = 0 end
+                            if config.BloomAdd then config.BloomAdd = 0 end
+                            if config.ADSBloomAdd then config.ADSBloomAdd = 0 end
+                            if config.MaxBloom then config.MaxBloom = 0 end
+                            if config.ADSMaxBloom then config.ADSMaxBloom = 0 end
+                            if config.Spray then config.Spray = 0 end
+                            if config.Kick then config.Kick = 0 end
+                            if config.KickUp then config.KickUp = 0 end
+                            if config.Accuracy then config.Accuracy = 1 end
+                        end
+                        
+                        if State.InstantReload then
+                            if config.ReloadTime then config.ReloadTime = 0.01 end
+                            if config.TacticalReloadTime then config.TacticalReloadTime = 0.01 end
+                            if config.EmptyReloadTime then config.EmptyReloadTime = 0.01 end
+                            if config.ReloadSpeed then config.ReloadSpeed = 100 end
+                        end
+                        
+                        if State.InfAmmoDurability then
+                            if config.DurabilityLossPerShot then config.DurabilityLossPerShot = 0 end
+                            if config.DurabilityLoss then config.DurabilityLoss = 0 end
+                            if config.Durability then config.Durability = 100 end
+                            if config.InfiniteAmmo ~= nil then config.InfiniteAmmo = true end
+                            if config.Ammo and config.MaxAmmo then config.Ammo = config.MaxAmmo end
+                        end
+                    end
+                end
+            end
+            
+            for _, item in ipairs(player.Backpack:GetDescendants()) do
+                pcall(modifyConfig, item)
+            end
+            local char = player.Character
+            if char then
+                for _, item in ipairs(char:GetDescendants()) do
+                    pcall(modifyConfig, item)
+                end
+                if State.InfAmmoDurability then
+                    for _, tool in ipairs(player.Backpack:GetChildren()) do
+                        if tool:IsA("Tool") then
+                            if tool:GetAttribute("Durability") then tool:SetAttribute("Durability", 100) end
+                            if tool:GetAttribute("DuraTex") then tool:SetAttribute("DuraTex", 100) end
+                            if tool:GetAttribute("Ammo") and tool:GetAttribute("MaxAmmo") then
+                                tool:SetAttribute("Ammo", tool:GetAttribute("MaxAmmo"))
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+        
+        task.wait(0.5)
+    end
+end))
+
+-- ─── NOCLIP LOGIC (MULTI-PHASE HYBRID STEPPED + POSITIONAL SHIFT) ──
+local noclipConnection = nil
+local function updateNoclip()
+    if noclipConnection then
+        untrack(noclipConnection)
+        noclipConnection = nil
+    end
+    
+    if State.Noclip then
+        noclipConnection = RunService.Stepped:Connect(function()
+            local char = player.Character
+            if not char then return end
+            
+            -- Disable CanCollide on all character parts & hitboxes
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    if part.CanCollide then part.CanCollide = false end
+                end
+            end
+            
+            -- Active Phase Offset when moving towards walls to prevent rollback teleports
+            local hum = char:FindFirstChild("Humanoid")
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hum and hrp then
+                local moveDir = hum.MoveDirection
+                if moveDir.Magnitude > 0 then
+                    sharedRaycastParams.FilterDescendantsInstances = {char}
+                    local rayResult = workspace:Raycast(hrp.Position, moveDir * 2.5, sharedRaycastParams)
+                    if rayResult then
+                        hrp.CFrame = hrp.CFrame + (moveDir * 1.5)
+                    end
+                end
+            end
+        end)
+        track(noclipConnection)
+    end
+end
+
+-- ─── GOD MODE (DESYNC) LOGIC ───────────────────────────────────────
+local godModeConnection = nil
+local originalRootC0 = nil
+local originalRootJointC0 = nil
+
+local function applyDesync(c)
+    local hrp = c:FindFirstChild("HumanoidRootPart")
+    local hum = c:FindFirstChild("Humanoid")
+    if not hrp or not hum then return end
+    
+    local lowerTorso = c:FindFirstChild("LowerTorso")
+    local root = lowerTorso and lowerTorso:FindFirstChild("Root")
+    local rootJoint = hrp:FindFirstChild("RootJoint")
+    local cam = workspace.CurrentCamera
+    
+    if State.GodMode then
+        if cam then cam.CameraSubject = hrp end
+        if root then
+            if not originalRootC0 then originalRootC0 = root.C0 end
+            root.C0 = CFrame.new(0, -500, 0)
+        elseif rootJoint then
+            if not originalRootJointC0 then originalRootJointC0 = rootJoint.C0 end
+            rootJoint.C0 = CFrame.new(0, -500, 0)
+        end
+    else
+        if root and originalRootC0 then root.C0 = originalRootC0 end
+        if rootJoint and originalRootJointC0 then rootJoint.C0 = originalRootJointC0 end
+        if cam and hum then cam.CameraSubject = hum end
+    end
+end
+
+local function updateGodMode()
+    local char = player.Character
+    if State.GodMode then
+        if char then applyDesync(char) end
+        if not godModeConnection then
+            godModeConnection = player.CharacterAdded:Connect(function(newChar)
+                task.wait(0.5)
+                if State.GodMode then applyDesync(newChar) end
+            end)
+            track(godModeConnection)
+        end
+    else
+        if godModeConnection then
+            untrack(godModeConnection)
+            godModeConnection = nil
+        end
+        if char then applyDesync(char) end
+    end
+end
+
+_G.restoreGodMode = function()
+    if godModeConnection then untrack(godModeConnection) end
+    local char = player.Character
+    if char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local lowerTorso = char:FindFirstChild("LowerTorso")
+        local root = lowerTorso and lowerTorso:FindFirstChild("Root")
+        local rootJoint = hrp and hrp:FindFirstChild("RootJoint")
+        if root and originalRootC0 then root.C0 = originalRootC0 end
+        if rootJoint and originalRootJointC0 then rootJoint.C0 = originalRootJointC0 end
+        local cam = workspace.CurrentCamera
+        if cam and char:FindFirstChild("Humanoid") then
+            cam.CameraSubject = char.Humanoid
+        end
+    end
+end
+
+-- ─── ARMOR & ITEM HELPER ───────────────────────────────────────────
+local function getArmorStats(char)
+    local helmetName, helmetDura = nil, nil
+    local armorName, armorDura = nil, nil
+    
+    if not ItemDataModule then
+        pcall(function()
+            local modules = RS:FindFirstChild("CLIENT_MODULES")
+            local itemDataMod = modules and modules:FindFirstChild("ItemData")
+            if itemDataMod then ItemDataModule = require(itemDataMod) end
+        end)
+    end
+    
+    for _, child in ipairs(char:GetChildren()) do
+        if child:IsA("Accessory") then
+            local data = ItemDataModule and ItemDataModule[child.Name]
+            local dura = child:GetAttribute("DuraTex") or "N/A"
+            local nameLower = child.Name:lower()
+            
+            local isHelmet = nameLower:match("helmet") or nameLower:match("helm") or nameLower:match("mask") or nameLower:match("cap") or nameLower:match("hat")
+            local isArmor = nameLower:match("vest") or nameLower:match("armor") or nameLower:match("chestplate") or nameLower:match("carrier")
+            
+            if data and data.Type == "Armor" then
+                if data.ArmorType == "Helmet" then isHelmet = true; isArmor = false
+                elseif data.ArmorType == "BodyArmor" then isArmor = true; isHelmet = false end
+            end
+            
+            if nameLower:match("nvg") or nameLower:match("backpack") then isHelmet = false; isArmor = false end
+            
+            if isHelmet then helmetName = child.Name; helmetDura = dura
+            elseif isArmor then armorName = child.Name; armorDura = dura end
+        end
+    end
+    return helmetName, helmetDura, armorName, armorDura
+end
+
+-- ─── HIGH-PERFORMANCE CENTRALIZED PLAYER ESP SYSTEM ─────────────────
+local function createPlayerEspGui(p, char, hrp)
+    cleanEspForPlayer(p)
+    
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "ESPHighlight"
+    highlight.Adornee = char
+    highlight.FillColor = Color3.fromRGB(235, 70, 50)
+    highlight.FillTransparency = 0.6
+    highlight.OutlineColor = Color3.new(1, 1, 1)
+    highlight.OutlineTransparency = 0.3
+    highlight.Parent = char
+    
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "ESPBillboard"
+    billboard.Adornee = hrp
+    billboard.Size = UDim2.new(0, 180, 0, 45)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextStrokeTransparency = 0.2
+    label.TextStrokeColor3 = Color3.fromRGB(10, 10, 12)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 10
+    label.Parent = billboard
+    
+    billboard.Parent = char
+    
+    PlayerEspGuis[p] = {
+        Highlight = highlight,
+        Billboard = billboard,
+        Label = label,
+        Char = char,
+        Hrp = hrp
+    }
+end
+
+local function startEspLoop()
+    if playerEspRenderConn then
+        untrack(playerEspRenderConn)
+        playerEspRenderConn = nil
+    end
+    
+    cleanAllEsp()
+    
+    if not State.PlayerESP then return end
+    
+    playerEspRenderConn = RunService.RenderStepped:Connect(function()
+        if not State.PlayerESP then
+            cleanAllEsp()
+            if playerEspRenderConn then untrack(playerEspRenderConn); playerEspRenderConn = nil end
+            return
+        end
+        
+        local localChar = player.Character
+        local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
+        local myPos = localHrp and localHrp.Position
+        local cam = workspace.CurrentCamera
+        local maxDist = State.ESPDistance or 1000
+        
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= player then
+                local char = p.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                local hum = char and char:FindFirstChild("Humanoid")
+                
+                if char and hrp and hum and hum.Health > 0 and char.Parent then
+                    local guiData = PlayerEspGuis[p]
+                    if not guiData or guiData.Char ~= char or not guiData.Highlight.Parent then
+                        createPlayerEspGui(p, char, hrp)
+                        guiData = PlayerEspGuis[p]
+                    end
+                    
+                    if guiData then
+                        local dist = myPos and (myPos - hrp.Position).Magnitude or 0
+                        local inRange = dist <= maxDist
+                        local isVisible = true
+                        
+                        if inRange and State.ESPOnlyVisible and cam and localChar then
+                            sharedRaycastParams.FilterDescendantsInstances = {localChar, char}
+                            local rayResult = workspace:Raycast(cam.CFrame.Position, hrp.Position - cam.CFrame.Position, sharedRaycastParams)
+                            if rayResult then isVisible = false end
+                        end
+                        
+                        guiData.Highlight.Enabled = inRange and isVisible
+                        guiData.Billboard.Enabled = inRange
+                        
+                        if inRange then
+                            local lines = {}
+                            if State.ESPShowName then
+                                table.insert(lines, p.Name)
+                            end
+                            
+                            local infoParts = {}
+                            if State.ESPShowHealth then
+                                table.insert(infoParts, string.format("%d HP", math.floor(hum.Health)))
+                            end
+                            if State.ESPShowDistance then
+                                table.insert(infoParts, string.format("%dm", math.floor(dist)))
+                            end
+                            
+                            if #infoParts > 0 then
+                                table.insert(lines, table.concat(infoParts, " • "))
+                            end
+                            
+                            if State.ESPShowArmor then
+                                local helmetName, helmetDura, armorName, armorDura = getArmorStats(char)
+                                local armorLine = {}
+                                if helmetName then table.insert(armorLine, "🪖 " .. helmetName:gsub(" Helmet", ""):gsub(" Helm", "")) end
+                                if armorName then table.insert(armorLine, "👕 " .. armorName:gsub(" Armor", ""):gsub(" Vest", "")) end
+                                if #armorLine > 0 then
+                                    table.insert(lines, table.concat(armorLine, " "))
+                                end
+                            end
+                            
+                            guiData.Label.Text = table.concat(lines, "\n")
+                            guiData.Label.TextColor3 = isVisible and Color3.new(1, 1, 1) or Color3.fromRGB(150, 150, 150)
+                        end
+                    end
+                else
+                    cleanEspForPlayer(p)
+                end
+            end
+        end
+    end)
+    track(playerEspRenderConn)
+end
+
+-- ─── WALKER / ZOMBIE ESP SYSTEM ────────────────────────────────────
+local function applyWalkerEsp(walkerModel)
+    cleanEspForWalker(walkerModel)
+    
+    local hrp = walkerModel:FindFirstChild("HumanoidRootPart") or walkerModel:FindFirstChildWhichIsA("BasePart")
+    local hum = walkerModel:FindFirstChild("Humanoid")
+    if not hrp or not hum then return end
+    
+    local instances = {}
+    
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "WalkerBillboard"
+    billboard.Adornee = hrp
+    billboard.Size = UDim2.new(0, 140, 0, 30)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = false
+    
+    local label = Instance.new("TextLabel", billboard)
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.fromRGB(255, 120, 50)
+    label.TextStrokeTransparency = 0.2
+    label.TextStrokeColor3 = Color3.fromRGB(10, 10, 12)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 10
+    
+    billboard.Parent = walkerModel
+    table.insert(instances, billboard)
+    WalkerEspInstances[walkerModel] = instances
+end
+
+local function startWalkerEspLoop()
+    if walkerThread then
+        pcall(function() task.cancel(walkerThread) end)
+        walkerThread = nil
+    end
+    
+    if not State.WalkerESP then
+        cleanAllWalkerEsp()
+        return
+    end
+    
+    walkerThread = task.spawn(function()
+        while State.WalkerESP and myLoopID == _G.TWDOLoopID do
+            local localChar = player.Character
+            local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
+            
+            if localHrp then
+                local myPos = localHrp.Position
+                local maxDist = State.WalkerDistance or 300
+                
+                local walkerFolders = {
+                    workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Walkers"),
+                    workspace:FindFirstChild("PresetWalkers")
+                }
+                
+                for _, folder in ipairs(walkerFolders) do
+                    if folder then
+                        for _, walker in ipairs(folder:GetChildren()) do
+                            if walker:IsA("Model") then
+                                local hum = walker:FindFirstChild("Humanoid")
+                                if hum and hum.Health > 0 then
+                                    if not WalkerEspInstances[walker] then
+                                        applyWalkerEsp(walker)
+                                    end
+                                    
+                                    local instances = WalkerEspInstances[walker]
+                                    if instances and instances[1] then
+                                        local bb = instances[1]
+                                        local hrp = walker:FindFirstChild("HumanoidRootPart") or walker.PrimaryPart
+                                        if hrp and bb.Parent then
+                                            local dist = (myPos - hrp.Position).Magnitude
+                                            local inRange = dist <= maxDist
+                                            bb.Enabled = inRange
+                                            if inRange then
+                                                local label = bb:FindFirstChildWhichIsA("TextLabel")
+                                                if label then
+                                                    label.Text = string.format("🧟 %s  •  %d HP  •  %dm", walker.Name, math.floor(hum.Health), math.floor(dist))
+                                                end
+                                            end
+                                        end
+                                    end
+                                else
+                                    cleanEspForWalker(walker)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+    trackThread(walkerThread)
+end
+
+-- ─── CORPSE & EXPANDED LOOT ESP SYSTEM ──────────────────────────────
+local function applyLootEsp(obj, displayName, color)
+    cleanLootEsp(obj)
+    
+    local adorneePart = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)) or obj
+    if not adorneePart then return end
+    
+    local instances = {}
+    
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "LootBillboard"
+    billboard.Adornee = adorneePart
+    billboard.Size = UDim2.new(0, 140, 0, 30)
+    billboard.StudsOffset = Vector3.new(0, 1.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = false
+    
+    local label = Instance.new("TextLabel", billboard)
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = color or Color3.fromRGB(235, 180, 50)
+    label.TextStrokeTransparency = 0.2
+    label.TextStrokeColor3 = Color3.fromRGB(10, 10, 12)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 10
+    
+    billboard.Parent = obj
+    table.insert(instances, billboard)
+    
+    LootEspInstances[obj] = instances
+end
+
+local function startLootEspLoop()
+    for _, c in ipairs(lootEspConnections) do pcall(function() c:Disconnect() end) end
+    lootEspConnections = {}
+    
+    if lootThread then
+        pcall(function() task.cancel(lootThread) end)
+        lootThread = nil
+    end
+    
+    if not State.LootESP then
+        cleanAllLootEsp()
+        return
+    end
+    
+    local function checkLootable(obj)
+        if not obj:IsDescendantOf(workspace) or LootEspInstances[obj] then return end
+        
+        if obj.Parent and obj.Parent.Name == "Corpses" then
+            applyLootEsp(obj, "💀 Corpse: " .. obj.Name, Color3.fromRGB(220, 60, 60))
+            return
+        end
+        
+        if obj:IsA("Tool") then
+            applyLootEsp(obj, "🔫 " .. obj.Name, Color3.fromRGB(235, 80, 180))
+            return
+        end
+        
+        if obj:IsA("Model") then
+            local lowerName = obj.Name:lower()
+            if lowerName:match("^loot_") or lowerName:match("crate") or lowerName:match("container") or lowerName:match("chest") or lowerName:match("bag") or lowerName:match("suitcase") then
+                local cleanName = obj.Name:gsub("^Loot_", ""):gsub("_", " ")
+                applyLootEsp(obj, "📦 " .. cleanName, Color3.fromRGB(235, 180, 50))
+            end
+        end
+    end
+    
+    local scanFolders = {
+        workspace:FindFirstChild("ItemDrops"),
+        workspace:FindFirstChild("PhysicalLoot"),
+        workspace:FindFirstChild("Lootables"),
+        workspace:FindFirstChild("Corpses"),
+        workspace
+    }
+    
+    for _, folder in ipairs(scanFolders) do
+        if folder then
+            for _, descendant in ipairs(folder:GetChildren()) do
+                pcall(checkLootable, descendant)
+            end
+            local conn = folder.ChildAdded:Connect(function(child)
+                pcall(checkLootable, child)
+            end)
+            table.insert(lootEspConnections, conn)
+            track(conn)
+        end
+    end
+    
+    lootThread = task.spawn(function()
+        while State.LootESP and myLoopID == _G.TWDOLoopID do
+            local localChar = player.Character
+            local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
+            
+            if localHrp then
+                local myPos = localHrp.Position
+                local maxDist = State.LootDistance or 300
+                
+                local toProcess = {}
+                for obj, instances in pairs(LootEspInstances) do
+                    table.insert(toProcess, {obj = obj, instances = instances})
+                end
+                
+                for index, item in ipairs(toProcess) do
+                    if index % 25 == 0 then task.wait() end
+                    if not State.LootESP then break end
+                    
+                    local obj = item.obj
+                    local instances = item.instances
+                    
+                    pcall(function()
+                        if not obj or not obj.Parent then
+                            cleanLootEsp(obj)
+                            return
+                        end
+                        
+                        local bb = instances and instances[1]
+                        if bb and bb.Adornee and bb.Adornee.Parent then
+                            local pos = bb.Adornee:IsA("BasePart") and bb.Adornee.Position or bb.Adornee:GetPivot().Position
+                            local dist = (myPos - pos).Magnitude
+                            local inRange = dist <= maxDist
+                            
+                            bb.Enabled = inRange
+                            if inRange then
+                                local label = bb:FindFirstChildWhichIsA("TextLabel")
+                                if label then
+                                    local prefix = obj.Parent and obj.Parent.Name == "Corpses" and "💀 " or (obj:IsA("Tool") and "🔫 " or "📦 ")
+                                    local cleanName = obj.Name:gsub("^Loot_", ""):gsub("_", " ")
+                                    label.Text = string.format("%s%s  •  %dm", prefix, cleanName, math.floor(dist))
+                                end
+                            end
+                        else
+                            cleanLootEsp(obj)
+                        end
+                    end)
+                end
+            end
+            task.wait(1.0)
+        end
+    end)
+    trackThread(lootThread)
+end
+
+-- ─── SILENT AIM SYSTEM ─────────────────────────────────────────────
+pcall(function()
+    fovCircleGui = Instance.new("ScreenGui")
+    fovCircleGui.Name = "TWDO_FOVCircle"
+    fovCircleGui.ResetOnSpawn = false
+    fovCircleGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    fovCircleGui.DisplayOrder = 999999
+    fovCircleGui.IgnoreGuiInset = true
+    fovCircleGui.Parent = player:WaitForChild("PlayerGui")
+    
+    local fovFrame = Instance.new("Frame", fovCircleGui)
+    fovFrame.Name = "CircleFrame"
+    fovFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+    fovFrame.BackgroundColor3 = Color3.fromRGB(235, 70, 50)
+    fovFrame.BackgroundTransparency = 1
+    fovFrame.BorderSizePixel = 0
+    fovFrame.Visible = false
+    
+    Instance.new("UICorner", fovFrame).CornerRadius = UDim.new(1, 0)
+    local uiStroke = Instance.new("UIStroke", fovFrame)
+    uiStroke.Color = Color3.fromRGB(235, 70, 50)
+    uiStroke.Thickness = 1.5
+    uiStroke.Transparency = 0.3
+end)
+
+_G.TWDO_State = State
+_G.TWDO_SilentAimTarget = nil
+
+local frameCount = 0
+local silentAimLoop = RunService.RenderStepped:Connect(function()
+    if fovCircleGui and fovCircleGui:FindFirstChild("CircleFrame") then
+        local fovFrame = fovCircleGui.CircleFrame
+        if State.SilentAimActive and State.ShowFOVCircle then
+            local mousePos = UserInputService:GetMouseLocation()
+            local size = (State.SilentAimFOV or 150) * 2
+            fovFrame.Size = UDim2.fromOffset(size, size)
+            fovFrame.Position = UDim2.fromOffset(mousePos.X, mousePos.Y)
+            fovFrame.Visible = true
+        else
+            fovFrame.Visible = false
+        end
+    end
+    
+    if not State.SilentAimActive then
+        _G.TWDO_SilentAimTarget = nil
+        return
+    end
+    
+    frameCount = frameCount + 1
+    if frameCount % 3 ~= 0 then return end
+    
+    local target = nil
+    local maxDistance = State.SilentAimFOV or 150
+    local mousePos = UserInputService:GetMouseLocation()
+    local cam = workspace.CurrentCamera
+    if not cam then _G.TWDO_SilentAimTarget = nil; return end
+    
+    local targetType = State.SilentAimTargetType or "Walkers"
+    local candidates = {}
+    
+    if targetType == "Players" or targetType == "Both" then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= player and p.Character then table.insert(candidates, p.Character) end
+        end
+    end
+    
+    if targetType == "Walkers" or targetType == "Both" then
+        local walkerFolders = {
+            workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Walkers"),
+            workspace:FindFirstChild("PresetWalkers")
+        }
+        for _, folder in ipairs(walkerFolders) do
+            if folder then
+                for _, walker in ipairs(folder:GetChildren()) do
+                    if walker:IsA("Model") then table.insert(candidates, walker) end
+                end
+            end
+        end
+    end
+    
+    for _, char in ipairs(candidates) do
+        local hum = char:FindFirstChild("Humanoid")
+        if hum and hum.Health > 0 then
+            local partName = "Head"
+            if State.SilentAimPart == "Body" then
+                partName = char:FindFirstChild("UpperTorso") and "UpperTorso" or "Torso"
+            elseif State.SilentAimPart == "Legs" then
+                partName = char:FindFirstChild("LeftLowerLeg") and "LeftLowerLeg" or "LeftLeg"
+            end
+            
+            local part = char:FindFirstChild(partName) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            if part then
+                local screenPos, onScreen = cam:WorldToViewportPoint(part.Position)
+                if onScreen then
+                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                    if dist < maxDistance then
+                        maxDistance = dist
+                        target = part
+                    end
+                end
+            end
+        end
+    end
+    _G.TWDO_SilentAimTarget = target
+end)
+track(silentAimLoop)
+
+-- Metamethod hooks for Mouse.Hit, WalkSpeed, and Stamina Visual Effects
+local Mouse = player:GetMouse()
+
+pcall(function()
+    if not _G.TWDO_OriginalIndex then
+        local oldIndex
+        oldIndex = hookmetamethod(game, "__index", function(self, key)
+            local state = _G.TWDO_State
+            if state and state.SilentAimActive and not checkcaller() then
+                if self == Mouse and (key == "Hit" or key == "Target") then
+                    if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+                        local targetPart = _G.TWDO_SilentAimTarget
+                        if targetPart then
+                            if key == "Hit" then return targetPart.CFrame
+                            elseif key == "Target" then return targetPart end
+                        end
+                    end
+                end
+            end
+            if oldIndex then
+                return oldIndex(self, key)
+            end
+            return self[key]
+        end)
+        if oldIndex then
+            _G.TWDO_OriginalIndex = oldIndex
+            _G.OriginalIndex = oldIndex
+        end
+    end
+    
+    if not _G.TWDO_OriginalNewIndex then
+        local oldNewIndex
+        oldNewIndex = hookmetamethod(game, "__newindex", function(self, key, value)
+            local state = _G.TWDO_State
+            if state and state.InfStamina and not checkcaller() then
+                if key == "WalkSpeed" and typeof(self) == "Instance" and self:IsA("Humanoid") then
+                    local char = player.Character
+                    if char and self:IsDescendantOf(char) then
+                        if typeof(value) == "number" and value < 23 then
+                            value = 23
+                        end
+                    end
+                elseif (key == "ImageTransparency" or key == "Visible") and typeof(self) == "Instance" and self.Name == "StaminaVignette" then
+                    if key == "ImageTransparency" then value = 1 end
+                    if key == "Visible" then value = false end
+                elseif (key == "Size" or key == "Enabled") and typeof(self) == "Instance" and (self.Name == "StaminaBlur" or self.Name == "CharBlur") then
+                    if key == "Size" then value = 0 end
+                    if key == "Enabled" then value = false end
+                end
+            end
+            if oldNewIndex then
+                return oldNewIndex(self, key, value)
+            end
+            self[key] = value
+        end)
+        if oldNewIndex then
+            _G.TWDO_OriginalNewIndex = oldNewIndex
+            _G.OriginalNewIndex = oldNewIndex
+        end
+    end
+    
+    if not _G.TWDO_OriginalTweenCreate then
+        local oldTweenCreate
+        oldTweenCreate = hookfunction(TweenService.Create, function(self, instance, tweenInfo, propertyTable)
+            local state = _G.TWDO_State
+            if state and state.InfStamina and not checkcaller() then
+                if typeof(instance) == "Instance" and instance:IsA("Humanoid") then
+                    local char = player.Character
+                    if char and instance:IsDescendantOf(char) then
+                        if propertyTable and propertyTable.WalkSpeed then
+                            if typeof(propertyTable.WalkSpeed) == "number" and propertyTable.WalkSpeed < 23 then
+                                propertyTable.WalkSpeed = 23
+                            end
+                        end
+                    end
+                end
+            end
+            if oldTweenCreate then
+                return oldTweenCreate(self, instance, tweenInfo, propertyTable)
+            end
+        end)
+        if oldTweenCreate then
+            _G.TWDO_OriginalTweenCreate = oldTweenCreate
+        end
+    end
+end)
+    
+    if not _G.TWDO_OriginalTweenCreate then
+        local oldTweenCreate; oldTweenCreate = hookfunction(TweenService.Create, function(self, instance, tweenInfo, propertyTable)
+            local state = _G.TWDO_State
+            if state and state.InfStamina and not checkcaller() then
+                if typeof(instance) == "Instance" and instance:IsA("Humanoid") then
+                    local char = player.Character
+                    if char and instance:IsDescendantOf(char) then
+                        if propertyTable and propertyTable.WalkSpeed then
+                            if typeof(propertyTable.WalkSpeed) == "number" and propertyTable.WalkSpeed < 23 then
+                                propertyTable.WalkSpeed = 23
+                            end
+                        end
+                    end
+                end
+            end
+            return oldTweenCreate(self, instance, tweenInfo, propertyTable)
+        end)
+        _G.TWDO_OriginalTweenCreate = oldTweenCreate
+    end
+end)
+
+-- ─── UI ELEMENTS & HUDAS HUB DARK THEME ────────────────────────────
+local SG = Instance.new("ScreenGui")
+SG.Name = "TWDOHub"
+SG.ResetOnSpawn = false
+SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+SG.IgnoreGuiInset = true
+SG.Parent = player.PlayerGui
+
+local oldCleanup = _G.__TWDO_CLEANUP
+_G.__TWDO_CLEANUP = function()
+    if oldCleanup then pcall(oldCleanup) end
+    pcall(function() SG:Destroy() end)
+end
+
+local DESIGN_W, DESIGN_H = 760, 485
+local camera = workspace.CurrentCamera
+local fab
+
+local MF = Instance.new("Frame")
+local uiScale = Instance.new("UIScale", MF)
+
+local function responsiveHeight()
+    local vp = camera and camera.ViewportSize
+    if not vp or vp.Y < 1 then return DESIGN_H end
+    local s = uiScale.Scale > 0 and uiScale.Scale or 1
+    return math.min(DESIGN_H, (vp.Y * 0.92) / s)
+end
+
+local function applyResponsive()
+    local vp = camera and camera.ViewportSize
+    if not vp or vp.X < 1 or vp.Y < 1 then return end
+    uiScale.Scale = math.clamp(math.min(vp.X / 1366, vp.Y / 768), 0.5, 1.15)
+    MF.Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())
+end
+
+track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyResponsive))
+
+MF.BackgroundColor3 = Color3.fromRGB(7, 7, 8)
+MF.BorderSizePixel = 0
+MF.AnchorPoint = Vector2.new(0.5, 0.5)
+MF.Position = UDim2.new(0.5, 0, 0.5, 0)
+MF.Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())
+MF.Parent = SG
+Instance.new("UICorner", MF).CornerRadius = UDim.new(0, 16)
+local stroke = Instance.new("UIStroke", MF)
+stroke.Color = Color3.fromRGB(235, 70, 50)
+stroke.Thickness = 1.0
+stroke.Transparency = 0.6
+
+-- Left Sidebar
+local Sidebar = Instance.new("Frame", MF)
+Sidebar.Name = "Sidebar"
+Sidebar.Size = UDim2.new(0, 210, 1, 0)
+Sidebar.BackgroundColor3 = Color3.fromRGB(10, 10, 11)
+Sidebar.BorderSizePixel = 0
+Instance.new("UICorner", Sidebar).CornerRadius = UDim.new(0, 16)
+
+local SB_header = Instance.new("Frame", Sidebar)
+SB_header.Size = UDim2.new(1, 0, 0, 70)
+SB_header.BackgroundTransparency = 1
+SB_header.ZIndex = 2
+
+local SB_logo = Instance.new("Frame", SB_header)
+SB_logo.Size = UDim2.fromOffset(40, 40)
+SB_logo.Position = UDim2.new(0, 16, 0.5, -20)
+SB_logo.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+SB_logo.BorderSizePixel = 0
+SB_logo.ZIndex = 2
+Instance.new("UICorner", SB_logo).CornerRadius = UDim.new(1, 0)
+local logo_stroke = Instance.new("UIStroke", SB_logo)
+logo_stroke.Color = Color3.fromRGB(235, 70, 50)
+logo_stroke.Thickness = 1.5
+
+local SB_logoText = Instance.new("TextLabel", SB_logo)
+SB_logoText.Size = UDim2.fromScale(1, 1)
+SB_logoText.BackgroundTransparency = 1
+SB_logoText.Font = Enum.Font.GothamBlack
+SB_logoText.Text = "HH"
+SB_logoText.TextColor3 = Color3.fromRGB(235, 70, 50)
+SB_logoText.TextSize = 18
+
+local function mkLabel(p, t, sz, pos, fsz, font, color, zidx, xal)
+    local l = Instance.new("TextLabel", p)
+    l.Size = sz or UDim2.fromScale(1, 1)
+    l.Position = pos or UDim2.new(0,0,0,0)
+    l.BackgroundTransparency = 1
+    l.Font = font or Enum.Font.GothamMedium
+    l.Text = t or ""
+    l.TextSize = fsz or 14
+    l.TextColor3 = color or Color3.new(1,1,1)
+    l.ZIndex = zidx or 1
+    l.TextXAlignment = xal or Enum.TextXAlignment.Left
+    return l
+end
+
+local SB_titleFrame = Instance.new("Frame", SB_header)
+SB_titleFrame.Size = UDim2.new(1, -72, 1, 0)
+SB_titleFrame.Position = UDim2.new(0, 68, 0, 0)
+SB_titleFrame.BackgroundTransparency = 1
+
+mkLabel(SB_titleFrame, "TWDO 3", UDim2.new(1, 0, 0, 16), UDim2.new(0, 0, 0.5, -14), 14, Enum.Font.GothamBold, Color3.fromRGB(250, 250, 250), 2)
+mkLabel(SB_titleFrame, "Hudas Hub v2", UDim2.new(1, 0, 0, 12), UDim2.new(0, 0, 0.5, 2), 10, Enum.Font.GothamBold, Color3.fromRGB(235, 70, 50), 2)
+
+local tabContainer = Instance.new("ScrollingFrame", Sidebar)
+tabContainer.Size = UDim2.new(1, 0, 1, -82)
+tabContainer.Position = UDim2.new(0, 0, 0, 82)
+tabContainer.BackgroundTransparency = 1
+tabContainer.BorderSizePixel = 0
+tabContainer.ScrollBarThickness = 0
+tabContainer.ZIndex = 2
+
+local tabLayout = Instance.new("UIListLayout", tabContainer)
+tabLayout.Padding = UDim.new(0, 6)
+tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Right Content Frame
+local Content = Instance.new("Frame", MF)
+Content.Name = "Content"
+Content.Size = UDim2.new(1, -210, 1, 0)
+Content.Position = UDim2.new(0, 210, 0, 0)
+Content.BackgroundTransparency = 1
+Content.ZIndex = 2
+
+local ContentHeader = Instance.new("Frame", Content)
+ContentHeader.Size = UDim2.new(1, 0, 0, 65)
+ContentHeader.BackgroundTransparency = 1
+
+local pageTitle = mkLabel(ContentHeader, "Main", UDim2.new(1, -120, 0, 24), UDim2.new(0, 18, 0, 18), 20, Enum.Font.GothamBold, Color3.fromRGB(250, 250, 250), 2)
+local pageSub = mkLabel(ContentHeader, "Combat & Movement", UDim2.new(1, -120, 0, 16), UDim2.new(0, 18, 0, 40), 11, Enum.Font.Gotham, Color3.fromRGB(150, 150, 160), 2)
+
+local minimizeBtn = Instance.new("TextButton", ContentHeader)
+minimizeBtn.Size = UDim2.fromOffset(22, 22)
+minimizeBtn.Position = UDim2.new(1, -66, 0.5, -11)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+minimizeBtn.Text = "-"; minimizeBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
+minimizeBtn.Font = Enum.Font.GothamBold; minimizeBtn.TextSize = 12
+Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 5)
+minimizeBtn.MouseButton1Click:Connect(function() MF.Visible = false end)
+
+local closeBtn = Instance.new("TextButton", ContentHeader)
+closeBtn.Size = UDim2.fromOffset(22, 22)
+closeBtn.Position = UDim2.new(1, -38, 0.5, -11)
+closeBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+closeBtn.Text = "×"; closeBtn.TextColor3 = Color3.fromRGB(220, 80, 80)
+closeBtn.Font = Enum.Font.GothamBold; closeBtn.TextSize = 14
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 5)
+closeBtn.MouseButton1Click:Connect(function()
+    if _G.__TWDO_CLEANUP then pcall(_G.__TWDO_CLEANUP); _G.__TWDO_CLEANUP = nil end
+end)
+
+local Pages = Instance.new("Frame", Content)
+Pages.Size = UDim2.new(1, 0, 1, -75)
+Pages.Position = UDim2.new(0, 0, 0, 75)
+Pages.BackgroundTransparency = 1
+
+local tabButtons, pageFrames = {}, {}
+local pageTitles = { Main = "Main Features", ESP = "ESP & Visuals", Settings = "Automation & Settings" }
+local pageSubs   = { Main = "Combat, Hitbox & Weapons", ESP = "Players, Walkers & Loot ESP", Settings = "Survival, Vehicles & AFK" }
+
+local function switchTab(tabName)
+    pageTitle.Text = pageTitles[tabName] or tabName
+    pageSub.Text = pageSubs[tabName] or ""
+    
+    for name, btn in pairs(tabButtons) do
+        local isActive = (name == tabName)
+        local indicator = btn:FindFirstChild("Indicator")
+        local label = btn:FindFirstChild("Label")
+        if indicator then indicator.Visible = isActive end
+        btn.BackgroundColor3 = isActive and Color3.fromRGB(18, 14, 15) or Color3.fromRGB(10, 10, 11)
+        if label then label.TextColor3 = isActive and Color3.fromRGB(250, 250, 250) or Color3.fromRGB(150, 150, 160) end
+    end
+    for name, frame in pairs(pageFrames) do frame.Visible = (name == tabName) end
+end
+
+local function createTabButton(name, display, order)
+    local btn = Instance.new("TextButton", tabContainer)
+    btn.Size = UDim2.new(0.9, 0, 0, 36)
+    btn.BackgroundColor3 = Color3.fromRGB(10, 10, 11)
+    btn.Text = ""; btn.LayoutOrder = order
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    
+    local indicator = Instance.new("Frame", btn)
+    indicator.Name = "Indicator"
+    indicator.Size = UDim2.new(0, 4, 1, 0)
+    indicator.BackgroundColor3 = Color3.fromRGB(235, 70, 50)
+    indicator.Visible = false
+    Instance.new("UICorner", indicator).CornerRadius = UDim.new(0, 2)
+    
+    local label = Instance.new("TextLabel", btn)
+    label.Name = "Label"
+    label.Size = UDim2.new(1, -16, 1, 0)
+    label.Position = UDim2.new(0, 12, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamMedium
+    label.Text = display
+    label.TextColor3 = Color3.fromRGB(150, 150, 160)
+    label.TextSize = 12
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    
+    btn.MouseButton1Click:Connect(function() switchTab(name) end)
+    tabButtons[name] = btn
+    
+    local page = Instance.new("Frame", Pages)
+    page.Size = UDim2.fromScale(1, 1)
+    page.BackgroundTransparency = 1
+    page.Visible = false
+    pageFrames[name] = page
+    return page
+end
+
+local mainPage     = createTabButton("Main",     "🎯 Main Combat", 1)
+local espPage      = createTabButton("ESP",      "👁️ ESP Visuals", 2)
+local settingsPage = createTabButton("Settings", "⚙️ Automation",   3)
+
+local function createColumnLayout(pageFrame)
+    local scroller = Instance.new("ScrollingFrame", pageFrame)
+    scroller.Size = UDim2.new(1, 0, 1, -10)
+    scroller.BackgroundTransparency = 1
+    scroller.BorderSizePixel = 0
+    scroller.ScrollBarThickness = 6
+    scroller.ScrollBarImageColor3 = Color3.fromRGB(235, 70, 50)
+    
+    local pad = Instance.new("UIPadding", scroller)
+    pad.PaddingLeft = UDim.new(0, 18); pad.PaddingRight = UDim.new(0, 18)
+    pad.PaddingTop = UDim.new(0, 6); pad.PaddingBottom = UDim.new(0, 18)
+    
+    local col = Instance.new("Frame", scroller)
+    col.Size = UDim2.new(1, 0, 0, 0)
+    col.BackgroundTransparency = 1
+    col.AutomaticSize = Enum.AutomaticSize.Y
+    
+    local list = Instance.new("UIListLayout", col)
+    list.SortOrder = Enum.SortOrder.LayoutOrder; list.Padding = UDim.new(0, 10)
+    
+    track(list:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        scroller.CanvasSize = UDim2.new(0, 0, 0, list.AbsoluteContentSize.Y + 30)
+    end))
+    
+    return col
+end
+
+local mainCol = createColumnLayout(mainPage)
+local espCol  = createColumnLayout(espPage)
+local setCol  = createColumnLayout(settingsPage)
+
+-- ─── CONTROL WIDGET BUILDERS ────────────────────────────────────────
+local nextOrder = 10
+local currentCol
+
+local function section(txt)
+    local holder = Instance.new("Frame", currentCol)
+    holder.Size = UDim2.new(1, 0, 0, 24)
+    holder.BackgroundTransparency = 1
+    holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    
+    local l = mkLabel(holder, string.upper(txt), UDim2.new(1, 0, 1, 0), UDim2.new(0, 8, 0, 0), 11, Enum.Font.GothamBold, Color3.fromRGB(235, 70, 50), 1)
+end
+
+local function toggle(icon, txt, onFn, key)
+    local row = Instance.new("Frame", currentCol)
+    row.Size = UDim2.new(1, 0, 0, 38)
+    row.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+    row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.85
+    
+    mkLabel(row, (icon ~= "" and (icon .. "  ") or "") .. txt, UDim2.new(1, -56, 1, 0), UDim2.new(0, 12, 0, 0), 12, Enum.Font.GothamMedium, Color3.fromRGB(235, 235, 240), 1)
+    
+    local trackUI = Instance.new("Frame", row)
+    trackUI.Size = UDim2.new(0, 36, 0, 20)
+    trackUI.Position = UDim2.new(1, -48, 0.5, -10)
+    trackUI.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    Instance.new("UICorner", trackUI).CornerRadius = UDim.new(1, 0)
+    
+    local thumb = Instance.new("Frame", trackUI)
+    thumb.Size = UDim2.new(0, 14, 0, 14)
+    thumb.Position = UDim2.new(0, 3, 0.5, -7)
+    thumb.BackgroundColor3 = Color3.fromRGB(120, 120, 130)
+    Instance.new("UICorner", thumb).CornerRadius = UDim.new(1, 0)
+    
+    local on = false
+    local btn = Instance.new("TextButton", row)
+    btn.Size = UDim2.new(1, 0, 1, 0); btn.BackgroundTransparency = 1; btn.Text = ""
+    
+    local function set(state)
+        on = state
+        trackUI.BackgroundColor3 = on and Color3.fromRGB(235, 70, 50) or Color3.fromRGB(35, 35, 40)
+        thumb.Position = on and UDim2.new(0, 19, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+        thumb.BackgroundColor3 = on and Color3.new(1, 1, 1) or Color3.fromRGB(120, 120, 130)
+        row.BackgroundColor3 = on and Color3.fromRGB(20, 14, 15) or Color3.fromRGB(12, 12, 14)
+        onFn(on)
+    end
+    btn.MouseButton1Click:Connect(function() set(not on) end)
+    set(State[key] or false)
+end
+
+local function dropdown(titleText, items, getState, setState)
+    local holder = Instance.new("Frame", currentCol)
+    holder.Size = UDim2.new(1, 0, 0, 38)
+    holder.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+    holder.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner", holder).CornerRadius = UDim.new(0, 8)
+    local hst = Instance.new("UIStroke", holder); hst.Color = Color3.fromRGB(235, 70, 50); hst.Transparency = 0.85
+    
+    mkLabel(holder, titleText, UDim2.new(0.4, 0, 1, 0), UDim2.new(0, 12, 0, 0), 12, Enum.Font.GothamBold, Color3.fromRGB(200, 200, 200), 1)
+    local valLabel = mkLabel(holder, tostring(getState()), UDim2.new(0.55, -20, 1, 0), UDim2.new(0.4, 0, 0, 0), 12, Enum.Font.GothamBold, Color3.fromRGB(235, 70, 50), 1, Enum.TextXAlignment.Right)
+    
+    local idx = 1
+    for i, it in ipairs(items) do if it == getState() then idx = i end end
+    
+    local btn = Instance.new("TextButton", holder)
+    btn.Size = UDim2.new(1, 0, 1, 0); btn.BackgroundTransparency = 1; btn.Text = ""
+    btn.MouseButton1Click:Connect(function()
+        idx = (idx % #items) + 1
+        local nextVal = items[idx]
+        valLabel.Text = tostring(nextVal)
+        setState(nextVal)
+    end)
+end
+
+local function slider(lbl, minV, maxV, defV, fn)
+    local row = Instance.new("Frame", currentCol)
+    row.Size = UDim2.new(1, 0, 0, 50)
+    row.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
+    row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+    local rst = Instance.new("UIStroke", row); rst.Color = Color3.fromRGB(235, 70, 50); rst.Transparency = 0.85
+    
+    mkLabel(row, lbl, UDim2.new(0.58, 0, 0, 20), UDim2.new(0, 12, 0, 4), 12, nil, Color3.fromRGB(180, 180, 180), 1)
+    local vl = mkLabel(row, tostring(defV), UDim2.new(0.38, 0, 0, 20), UDim2.new(0.6, 0, 0, 4), 12, Enum.Font.GothamBold, Color3.fromRGB(235, 70, 50), 1, Enum.TextXAlignment.Right)
+    
+    local trk = Instance.new("Frame", row)
+    trk.Size = UDim2.new(1, -24, 0, 6)
+    trk.Position = UDim2.new(0, 12, 0, 32)
+    trk.BackgroundColor3 = Color3.fromRGB(30, 30, 36)
+    Instance.new("UICorner", trk).CornerRadius = UDim.new(1, 0)
+    
+    local pct = (defV - minV) / (maxV - minV)
+    local fl = Instance.new("Frame", trk)
+    fl.Size = UDim2.new(pct, 0, 1, 0)
+    fl.BackgroundColor3 = Color3.fromRGB(235, 70, 50)
+    Instance.new("UICorner", fl).CornerRadius = UDim.new(1, 0)
+    
+    local th = Instance.new("TextButton", trk)
+    th.Size = UDim2.fromOffset(14, 14)
+    th.Position = UDim2.new(pct, -7, 0.5, -7)
+    th.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+    th.Text = ""; th.ZIndex = 2
+    Instance.new("UICorner", th).CornerRadius = UDim.new(1, 0)
+    
+    local function setSlider(v)
+        v = math.clamp(math.floor(tonumber(v) or defV), minV, maxV)
+        local r = (v - minV) / (maxV - minV)
+        fl.Size = UDim2.new(r, 0, 1, 0)
+        th.Position = UDim2.new(r, -7, 0.5, -7)
+        vl.Text = tostring(v)
+        fn(v)
+    end
+    
+    local drag = false
+    th.InputBegan:Connect(function(ip)
+        if ip.UserInputType == Enum.UserInputType.MouseButton1 or ip.UserInputType == Enum.UserInputType.Touch then drag = true end
+    end)
+    track(UserInputService.InputChanged:Connect(function(ip)
+        if drag and (ip.UserInputType == Enum.UserInputType.MouseMovement or ip.UserInputType == Enum.UserInputType.Touch) then
+            local rx = (ip.Position.X - trk.AbsolutePosition.X) / trk.AbsoluteSize.X
+            setSlider(minV + math.clamp(rx, 0, 1) * (maxV - minV))
+        end
+    end))
+    track(UserInputService.InputEnded:Connect(function(ip)
+        if ip.UserInputType == Enum.UserInputType.MouseButton1 or ip.UserInputType == Enum.UserInputType.Touch then drag = false end
+    end))
+end
+
+local function actionBtn(txt, color, fn)
+    local row = Instance.new("Frame", currentCol)
+    row.Size = UDim2.new(1, 0, 0, 38)
+    row.LayoutOrder = nextOrder; nextOrder = nextOrder + 1
+    
+    local b = Instance.new("TextButton", row)
+    b.Size = UDim2.new(1, 0, 1, 0)
+    b.BackgroundColor3 = color
+    b.Text = txt; b.TextColor3 = Color3.new(1, 1, 1)
+    b.TextSize = 12; b.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+    b.MouseButton1Click:Connect(fn)
+end
+
+-- ─── POPULATE MAIN TAB ─────────────────────────────────────────────
+currentCol = mainCol
+section("Silent Aim System")
+toggle("🎯", "Enable Silent Aim", function(v) State.SilentAimActive = v end, "SilentAimActive")
+dropdown("Target Type", {"Walkers", "Players", "Both"}, function() return State.SilentAimTargetType end, function(v) State.SilentAimTargetType = v end)
+dropdown("Target Hitbox", {"Head", "Body", "Legs"}, function() return State.SilentAimPart end, function(v) State.SilentAimPart = v end)
+slider("Silent Aim FOV", 50, 500, 150, function(v) State.SilentAimFOV = v end)
+toggle("⭕", "Show FOV Circle", function(v) State.ShowFOVCircle = v end, "ShowFOVCircle")
+
+section("Hitbox Expander")
+toggle("🧠", "Headshot Hitbox Expander", function(v) State.HitboxExpander = v; startHitboxExpanderLoop() end, "HitboxExpander")
+slider("Head Hitbox Size", 2, 12, 5, function(v) State.HitboxSize = v end)
+
+section("Weapon & Movement Modifiers")
+toggle("🔫", "No Recoil & Zero Spread", function(v) State.NoRecoilSpread = v end, "NoRecoilSpread")
+toggle("⚡", "Instant Reload (Normal RPM)", function(v) State.InstantReload = v end, "InstantReload")
+toggle("♾️", "Infinite Ammo & Weapon Durability", function(v) State.InfAmmoDurability = v end, "InfAmmoDurability")
+toggle("⚡", "Infinite Stamina", function(v) State.InfStamina = v end, "InfStamina")
+toggle("👻", "Noclip", function(v) State.Noclip = v; updateNoclip() end, "Noclip")
+toggle("🛡️", "God Mode (Zombie Desync)", function(v) State.GodMode = v; updateGodMode() end, "GodMode")
+
+-- ─── POPULATE ESP TAB ──────────────────────────────────────────────
+currentCol = espCol
+section("Player Visuals & Customization")
+toggle("👁️", "Player ESP", function(v) State.PlayerESP = v; startEspLoop() end, "PlayerESP")
+toggle("🧱", "Hide ESP Behind Walls", function(v) State.ESPOnlyVisible = v end, "ESPOnlyVisible")
+toggle("👤", "Show Player Name", function(v) State.ESPShowName = v end, "ESPShowName")
+toggle("❤️", "Show Health", function(v) State.ESPShowHealth = v end, "ESPShowHealth")
+toggle("📏", "Show Distance", function(v) State.ESPShowDistance = v end, "ESPShowDistance")
+toggle("🪖", "Show Armor Stats (Optional)", function(v) State.ESPShowArmor = v end, "ESPShowArmor")
+slider("Player ESP Max Distance", 100, 5000, 1000, function(v) State.ESPDistance = v end)
+
+section("Walker / Zombie Visuals")
+toggle("🧟", "Walker / Zombie ESP", function(v) State.WalkerESP = v; startWalkerEspLoop() end, "WalkerESP")
+slider("Walker ESP Max Distance", 50, 1500, 300, function(v) State.WalkerDistance = v end)
+
+section("Loot & Corpse Visuals")
+toggle("📦", "Loot & Corpse ESP", function(v) State.LootESP = v; startLootEspLoop() end, "LootESP")
+slider("Loot ESP Max Distance", 50, 1500, 300, function(v) State.LootDistance = v end)
+
+-- ─── POPULATE SETTINGS & AUTOMATION TAB ────────────────────────────
+currentCol = setCol
+section("Instant Survival Automation")
+toggle("🧪", "Auto-Eat / Drink / Heal (Instant No Anim)", function(v) State.AutoHealEatDrink = v; startAutoSurvivalLoop() end, "AutoHealEatDrink")
+slider("Auto-Heal HP Threshold", 20, 90, 60, function(v) State.HealthThreshold = v end)
+slider("Auto-Eat/Drink Threshold", 20, 80, 50, function(v) State.HungerThirstThreshold = v end)
+
+section("Vehicle Automation")
+toggle("⛽", "Auto Refill Vehicle Fuel", function(v) State.AutoFillVehicle = v; startVehicleRefillLoop() end, "AutoFillVehicle")
+
+section("Protection Helpers")
+toggle("⚡", "Anti-AFK Protection", function(v) State.AntiAFK = v end, "AntiAFK")
+
+section("Script Unloader")
+actionBtn("UNLOAD TWDO SCRIPT", Color3.fromRGB(140, 35, 40), function()
+    if _G.__TWDO_CLEANUP then pcall(_G.__TWDO_CLEANUP); _G.__TWDO_CLEANUP = nil end
+end)
+
+-- Draggable Main Panel Support
+local isDrag, dStart, dPos = false, nil, nil
+local dragTargets = {SB_header, Sidebar, ContentHeader}
+for _, target in ipairs(dragTargets) do
+    target.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            isDrag = true; dStart = i.Position; dPos = MF.Position
+        end
+    end)
+end
+track(UserInputService.InputChanged:Connect(function(i)
+    if isDrag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - dStart
+        MF.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset + d.X, dPos.Y.Scale, dPos.Y.Offset + d.Y)
+    end
+end))
+track(UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then isDrag = false end
+end))
+
+-- Floating Toggle Button
+fab = Instance.new("TextButton")
+fab.Name = "Toggle"
+fab.Size = UDim2.fromOffset(52, 52)
+fab.AnchorPoint = Vector2.new(0.5, 0.5)
+fab.Position = UDim2.new(0, 32, 0.5, 0)
+fab.BackgroundColor3 = Color3.fromRGB(15, 15, 17)
+fab.AutoButtonColor = false
+fab.Text = ""; fab.ZIndex = 50; fab.Parent = SG
+Instance.new("UICorner", fab).CornerRadius = UDim.new(1, 0)
+local fring = Instance.new("UIStroke", fab); fring.Color = Color3.fromRGB(235, 70, 50); fring.Thickness = 2.5
+
+local t = Instance.new("TextLabel", fab)
+t.Size = UDim2.fromScale(1, 1); t.BackgroundTransparency = 1; t.Font = Enum.Font.GothamBlack
+t.Text = "HH"; t.TextColor3 = Color3.fromRGB(235, 70, 80); t.TextSize = 20; t.ZIndex = 51
+
+local fDrag, fMoved, fStart, fPos = false, false, nil, nil
+fab.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        fDrag = true; fMoved = false; fStart = i.Position; fPos = fab.Position
+    end
+end)
+track(UserInputService.InputChanged:Connect(function(i)
+    if fDrag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - fStart
+        if math.abs(d.X) + math.abs(d.Y) > 6 then fMoved = true end
+        fab.Position = UDim2.new(fPos.X.Scale, fPos.X.Offset + d.X, fPos.Y.Scale, fPos.Y.Offset + d.Y)
+    end
+end))
+track(UserInputService.InputEnded:Connect(function(i)
+    if fDrag and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+        fDrag = false
+        if not fMoved then MF.Visible = not MF.Visible end
+    end
+end))
+
+-- Initialization
+switchTab("Main")
+startAntiAFK()
+MF.Size = UDim2.fromOffset(DESIGN_W, responsiveHeight())
+MF.Position = UDim2.new(0.5, 0, 0.5, 0)
+
+warn("[TWDO Hub] Premium Clean Hudas Hub Script Loaded with New Features!")

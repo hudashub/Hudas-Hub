@@ -70,7 +70,7 @@ end
 
 local function cleanAllLootEsp()
     for obj, _ in pairs(LootEspInstances) do
-        cleanAllLootEsp(obj)
+        cleanLootEsp(obj)
     end
 end
 
@@ -90,7 +90,8 @@ local function cleanAllEsp()
     for p, _ in pairs(PlayerEspGuis) do
         cleanEspForPlayer(p)
     end
-    PlayerEspGuis = {}
+    -- Preserve the weak-key metatable — do NOT replace with a plain {}
+    for k in pairs(PlayerEspGuis) do PlayerEspGuis[k] = nil end
 end
 
 local playerEspRenderConn = nil
@@ -130,11 +131,24 @@ _G.__TWDO_CLEANUP = function()
         pcall(function() task.cancel(t) end)
     end
     for _, c in ipairs(lootEspConnections) do pcall(function() c:Disconnect() end) end
-    for _, c in ipairs(vehicleEspConnections) do pcall(function() c:Disconnect() end) end
-    
+    -- vehicleEspConnections declared later — guard with pcall
+    pcall(function()
+        for _, c in ipairs(vehicleEspConnections) do pcall(function() c:Disconnect() end) end
+    end)
+    -- Disconnect per-player health listeners
+    pcall(function()
+        for _, conn in pairs(playerHealthConns) do
+            pcall(function() conn:Disconnect() end)
+        end
+        for k in pairs(playerHealthConns) do playerHealthConns[k] = nil end
+    end)
+    -- Cancel new threads that were added after original cleanup was written
+    if playerEspUpdateThread then pcall(function() task.cancel(playerEspUpdateThread) end); playerEspUpdateThread = nil end
+    if playerAddedConn then pcall(function() playerAddedConn:Disconnect() end); playerAddedConn = nil end
+    if noclipPreSimConn then pcall(function() noclipPreSimConn:Disconnect() end); noclipPreSimConn = nil end
     lootEspConnections = {}
     vehicleEspConnections = {}
-    
+
     cleanAllEsp()
     cleanAllWalkerEsp()
     cleanAllLootEsp()
@@ -179,7 +193,7 @@ local State = {
     
     -- Silent Aim & Hitbox
     SilentAimActive = false,
-    SilentAimTargetType = "Walkers", -- "Walkers", "Players", "Both"
+    SilentAimTargetType = "Both", -- "Walkers", "Players", "Both"
     SilentAimPart = "Head",
     SilentAimFOV = 150,
     ShowFOVCircle = true,
@@ -404,38 +418,38 @@ local function startVehicleRefillLoop()
 end
 
 -- ─── WEAPON MODIFIERS (RECOIL, INSTANT RELOAD, INF AMMO & DURA) ───
+-- processedGunModules lives outside the loop so it persists between ticks
+-- and we never re-require a module we already patched
+local processedGunModules = setmetatable({}, {__mode = "k"})
+
+-- Cache of backpack items already scanned — invalidated on backpack change
+local backpackDirty = true
+track(player.Backpack.ChildAdded:Connect(function() backpackDirty = true end))
+track(player.Backpack.ChildRemoved:Connect(function() backpackDirty = true end))
+
 trackThread(task.spawn(function()
     while true do
         if myLoopID ~= _G.TWDOLoopID then break end
-        
-        -- High-frequency stamina & speed enforcement + blur removal
+
+        -- Stamina & blur enforcement
         pcall(function()
             if State.InfStamina then
                 local char = player.Character
                 if char then
                     local hum = char:FindFirstChild("Humanoid")
-                    if hum and hum.WalkSpeed < 23 then
-                        hum.WalkSpeed = 23
-                    end
+                    if hum and hum.WalkSpeed < 23 then hum.WalkSpeed = 23 end
                     local stam = char:FindFirstChild("Stamina") or char:FindFirstChild("Sprint")
-                    if stam and stam:IsA("ValueObject") then
-                        stam.Value = stam.MaxValue or 100
-                    end
-                    if char:GetAttribute("Stamina") then
-                        char:SetAttribute("Stamina", 100)
-                    end
+                    if stam and stam:IsA("ValueObject") then stam.Value = stam.MaxValue or 100 end
+                    if char:GetAttribute("Stamina") then char:SetAttribute("Stamina", 100) end
                 end
-                if player:GetAttribute("Stamina") then
-                    player:SetAttribute("Stamina", 100)
-                end
-                
-                -- Neutralize StaminaBlur, CharBlur, and StaminaVignette
+                if player:GetAttribute("Stamina") then player:SetAttribute("Stamina", 100) end
+
                 local lighting = game:GetService("Lighting")
                 local sBlur = lighting:FindFirstChild("StaminaBlur")
                 if sBlur then sBlur.Enabled = false; sBlur.Size = 0 end
                 local cBlur = lighting:FindFirstChild("CharBlur")
                 if cBlur then cBlur.Enabled = false; cBlur.Size = 0 end
-                
+
                 local userGui = player.PlayerGui:FindFirstChild("UserGUI")
                 if userGui then
                     for _, vName in ipairs({"ShootVignette", "HurtVignette", "StaminaVignette"}) do
@@ -445,116 +459,112 @@ trackThread(task.spawn(function()
                 end
             end
         end)
-        
-local processedGunModules = setmetatable({}, {__mode = "k"})
 
-        -- Zeroing out gun config tables in ItemData, backpack and character
-        pcall(function()
-            if State.NoRecoilSpread then
-                local itemDataMod = RS:FindFirstChild("CLIENT_MODULES") and RS.CLIENT_MODULES:FindFirstChild("ItemData")
-                if itemDataMod then
-                    local data = require(itemDataMod)
-                    if type(data) == "table" then
-                        for name, gun in pairs(data) do
-                            if type(gun) == "table" and (gun.Type == "Gun" or gun.Recoil ~= nil) then
-                                gun.Recoil = 0
-                                gun.SpreadAngle = 0
-                                gun.ADSSpreadAngle = 0
-                                gun.BloomAdd = 0
-                                gun.ADSBloomAdd = 0
-                                gun.MaxBloom = 0
+        -- Gun config patching — only when features are on AND backpack changed
+        if (State.NoRecoilSpread or State.InstantReload) and backpackDirty then
+            backpackDirty = false
+            pcall(function()
+                -- Patch the shared ItemData module once
+                if State.NoRecoilSpread and ItemDataModule and type(ItemDataModule) == "table" then
+                    for _, gun in pairs(ItemDataModule) do
+                        if type(gun) == "table" and (gun.Type == "Gun" or gun.Recoil ~= nil) then
+                            if not processedGunModules[gun] then
+                                gun.Recoil = 0; gun.SpreadAngle = 0; gun.ADSSpreadAngle = 0
+                                gun.BloomAdd = 0; gun.ADSBloomAdd = 0; gun.MaxBloom = 0
                                 gun.ADSMaxBloom = 0
                                 if gun.Kick then gun.Kick = 0 end
                                 if gun.KickUp then gun.KickUp = 0 end
                                 if gun.Spray then gun.Spray = 0 end
                                 if gun.Accuracy then gun.Accuracy = 1 end
+                                processedGunModules[gun] = true
                             end
                         end
                     end
                 end
-            end
 
-            local function modifyConfig(inst)
-                if inst:IsA("ModuleScript") and (inst.Name:lower():match("config") or inst.Name:lower():match("setting") or inst.Name:lower():match("gun")) then
-                    local config = require(inst)
-                    if type(config) == "table" then
-                        if State.NoRecoilSpread then
-                            config.Recoil = 0
-                            config.Spread = 0
-                            config.MinSpread = 0
-                            config.MaxSpread = 0
-                            config.SpreadAngle = 0
-                            config.ADSSpreadAngle = 0
-                            config.BloomAdd = 0
-                            config.ADSBloomAdd = 0
-                            config.MaxBloom = 0
-                            config.ADSMaxBloom = 0
-                            config.Spray = 0
-                            config.Kick = 0
-                            config.KickUp = 0
-                        end
-                        
-                        if State.InstantReload then
-                            if config.ReloadTime then config.ReloadTime = 0.01 end
-                            if config.TacticalReloadTime then config.TacticalReloadTime = 0.01 end
-                            if config.EmptyReloadTime then config.EmptyReloadTime = 0.01 end
-                            if config.ReloadSpeed then config.ReloadSpeed = 100 end
+                local function modifyConfig(inst)
+                    if processedGunModules[inst] then return end
+                    if inst:IsA("ModuleScript") and (
+                        inst.Name:lower():match("config") or
+                        inst.Name:lower():match("setting") or
+                        inst.Name:lower():match("gun")
+                    ) then
+                        local ok, config = pcall(require, inst)
+                        if ok and type(config) == "table" then
+                            if State.NoRecoilSpread then
+                                config.Recoil = 0; config.Spread = 0
+                                config.MinSpread = 0; config.MaxSpread = 0
+                                config.SpreadAngle = 0; config.ADSSpreadAngle = 0
+                                config.BloomAdd = 0; config.ADSBloomAdd = 0
+                                config.MaxBloom = 0; config.ADSMaxBloom = 0
+                                config.Spray = 0; config.Kick = 0; config.KickUp = 0
+                            end
+                            if State.InstantReload then
+                                if config.ReloadTime then config.ReloadTime = 0.01 end
+                                if config.TacticalReloadTime then config.TacticalReloadTime = 0.01 end
+                                if config.EmptyReloadTime then config.EmptyReloadTime = 0.01 end
+                                if config.ReloadSpeed then config.ReloadSpeed = 100 end
+                            end
+                            processedGunModules[inst] = true
                         end
                     end
                 end
-            end
-            
-            for _, item in ipairs(player.Backpack:GetDescendants()) do
-                pcall(modifyConfig, item)
-            end
-            local char = player.Character
-            if char then
-                for _, item in ipairs(char:GetDescendants()) do
+
+                for _, item in ipairs(player.Backpack:GetDescendants()) do
                     pcall(modifyConfig, item)
                 end
-            end
-        end)
-        
+                local char = player.Character
+                if char then
+                    for _, item in ipairs(char:GetDescendants()) do
+                        pcall(modifyConfig, item)
+                    end
+                end
+            end)
+        end
+
         task.wait(0.5)
     end
 end))
 
--- ─── NOCLIP LOGIC (MULTI-PHASE HYBRID STEPPED + POSITIONAL SHIFT) ──
-local noclipConnection = nil
+-- ─── NOCLIP LOGIC ─────────────────────────────────────────────
+local noclipConnection  = nil
+local noclipPreSimConn  = nil
+
 local function updateNoclip()
-    if noclipConnection then
-        untrack(noclipConnection)
-        noclipConnection = nil
-    end
-    
-    if State.Noclip then
-        noclipConnection = RunService.Stepped:Connect(function()
-            local char = player.Character
-            if not char then return end
-            
-            -- Disable CanCollide on all character parts & hitboxes
-            for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    if part.CanCollide then part.CanCollide = false end
-                end
+    if noclipPreSimConn then untrack(noclipPreSimConn); noclipPreSimConn = nil end
+    if noclipConnection  then untrack(noclipConnection);  noclipConnection  = nil end
+
+    if not State.Noclip then return end
+
+    -- PreSimulation fires BEFORE the physics engine resolves collisions each step.
+    -- Setting CanCollide=false here means the engine never builds a constraint
+    -- or correction force, so there is no rubber-band / rollback at all.
+    noclipPreSimConn = RunService.PreSimulation:Connect(function()
+        local char = player.Character
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                part.CanCollide = false
             end
-            
-            -- Active Phase Offset when moving towards walls to prevent rollback teleports
-            local hum = char:FindFirstChild("Humanoid")
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hum and hrp then
-                local moveDir = hum.MoveDirection
-                if moveDir.Magnitude > 0 then
-                    sharedRaycastParams.FilterDescendantsInstances = {char}
-                    local rayResult = workspace:Raycast(hrp.Position, moveDir * 2.5, sharedRaycastParams)
-                    if rayResult then
-                        hrp.CFrame = hrp.CFrame + (moveDir * 1.5)
-                    end
+        end
+    end)
+    track(noclipPreSimConn)
+
+    -- PostSimulation: assert client network ownership on HRP so the server
+    -- does not teleport us back via its own position authority.
+    noclipConnection = RunService.PostSimulation:Connect(function()
+        local char = player.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            pcall(function()
+                if hrp:GetNetworkOwner() ~= player then
+                    hrp:SetNetworkOwner(player)
                 end
-            end
-        end)
-        track(noclipConnection)
-    end
+            end)
+        end
+    end)
+    track(noclipConnection)
 end
 
 -- ─── GOD MODE (DESYNC) LOGIC ───────────────────────────────────────
@@ -664,7 +674,7 @@ end
 -- ─── HIGH-PERFORMANCE CENTRALIZED PLAYER ESP SYSTEM ─────────────────
 local function createPlayerEspGui(p, char, hrp)
     cleanEspForPlayer(p)
-    
+
     local highlight = Instance.new("Highlight")
     highlight.Name = "ESPHighlight"
     highlight.Adornee = char
@@ -672,15 +682,17 @@ local function createPlayerEspGui(p, char, hrp)
     highlight.FillTransparency = 0.6
     highlight.OutlineColor = Color3.new(1, 1, 1)
     highlight.OutlineTransparency = 0.3
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     highlight.Parent = char
-    
+
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "ESPBillboard"
     billboard.Adornee = hrp
     billboard.Size = UDim2.new(0, 180, 0, 45)
     billboard.StudsOffset = Vector3.new(0, 3, 0)
     billboard.AlwaysOnTop = true
-    
+    billboard.Enabled = false
+
     local label = Instance.new("TextLabel")
     label.Size = UDim2.fromScale(1, 1)
     label.BackgroundTransparency = 1
@@ -690,9 +702,9 @@ local function createPlayerEspGui(p, char, hrp)
     label.Font = Enum.Font.GothamBold
     label.TextSize = 10
     label.Parent = billboard
-    
+
     billboard.Parent = char
-    
+
     PlayerEspGuis[p] = {
         Highlight = highlight,
         Billboard = billboard,
@@ -702,95 +714,177 @@ local function createPlayerEspGui(p, char, hrp)
     }
 end
 
-local function startEspLoop()
-    if playerEspRenderConn then
-        untrack(playerEspRenderConn)
-        playerEspRenderConn = nil
-    end
-    
-    cleanAllEsp()
-    
-    if not State.PlayerESP then return end
-    
-    playerEspRenderConn = RunService.RenderStepped:Connect(function()
-        if not State.PlayerESP then
-            cleanAllEsp()
-            if playerEspRenderConn then untrack(playerEspRenderConn); playerEspRenderConn = nil end
-            return
+-- Track per-player health change connections for instant ESP health updates
+-- Weak-value so GC cleans up if the player leaves before we manually do
+local playerHealthConns = {}
+
+local function hookPlayerEsp(p)
+    if p == player then return end
+    track(p.CharacterAdded:Connect(function(char)
+        if not State.PlayerESP then return end
+        local hrp = char:WaitForChild("HumanoidRootPart", 5)
+        if hrp then
+            createPlayerEspGui(p, char, hrp)
         end
-        
-        local localChar = player.Character
-        local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
-        local myPos = localHrp and localHrp.Position
-        local cam = workspace.CurrentCamera
-        local maxDist = State.ESPDistance or 1000
-        
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= player then
-                local char = p.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                local hum = char and char:FindFirstChild("Humanoid")
-                
-                if char and hrp and hum and hum.Health > 0 and char.Parent then
-                    local guiData = PlayerEspGuis[p]
-                    if not guiData or guiData.Char ~= char or not guiData.Highlight.Parent then
-                        createPlayerEspGui(p, char, hrp)
-                        guiData = PlayerEspGuis[p]
-                    end
-                    
-                    if guiData then
-                        local dist = myPos and (myPos - hrp.Position).Magnitude or 0
-                        local inRange = dist <= maxDist
-                        local isVisible = true
-                        
-                        if inRange and State.ESPOnlyVisible and cam and localChar then
-                            sharedRaycastParams.FilterDescendantsInstances = {localChar, char}
-                            local rayResult = workspace:Raycast(cam.CFrame.Position, hrp.Position - cam.CFrame.Position, sharedRaycastParams)
-                            if rayResult then isVisible = false end
-                        end
-                        
-                        guiData.Highlight.Enabled = inRange and isVisible
-                        guiData.Billboard.Enabled = inRange
-                        
-                        if inRange then
-                            local lines = {}
-                            if State.ESPShowName then
-                                table.insert(lines, p.Name)
+        -- Wire up instant health-change label refresh
+        local hum = char:WaitForChild("Humanoid", 5)
+        if hum then
+            if playerHealthConns[p] then
+                pcall(function() playerHealthConns[p]:Disconnect() end)
+            end
+            playerHealthConns[p] = hum:GetPropertyChangedSignal("Health"):Connect(function()
+                local guiData = PlayerEspGuis[p]
+                if guiData and guiData.Label and State.ESPShowHealth then
+                    local currentText = guiData.Label.Text
+                    -- Replace HP portion inline to avoid full rebuild
+                    local hp = math.floor(hum.Health)
+                    guiData.Label.Text = currentText:gsub("%d+ HP", hp .. " HP")
+                end
+            end)
+        end
+    end))
+    -- Hook current character if already loaded
+    local char = p.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if char and hrp and State.PlayerESP then
+        createPlayerEspGui(p, char, hrp)
+        -- Also hook health immediately for existing chars
+        local hum = char:FindFirstChild("Humanoid")
+        if hum then
+            if playerHealthConns[p] then
+                pcall(function() playerHealthConns[p]:Disconnect() end)
+            end
+            playerHealthConns[p] = hum:GetPropertyChangedSignal("Health"):Connect(function()
+                local guiData = PlayerEspGuis[p]
+                if guiData and guiData.Label and State.ESPShowHealth then
+                    local hp = math.floor(hum.Health)
+                    guiData.Label.Text = guiData.Label.Text:gsub("%d+ HP", hp .. " HP")
+                end
+            end)
+        end
+    end
+end
+
+local playerEspUpdateThread = nil
+local playerAddedConn = nil
+
+local function startEspLoop()
+    -- Tear down old state
+    if playerEspRenderConn then untrack(playerEspRenderConn); playerEspRenderConn = nil end
+    if playerEspUpdateThread then pcall(function() task.cancel(playerEspUpdateThread) end); playerEspUpdateThread = nil end
+    if playerAddedConn then untrack(playerAddedConn); playerAddedConn = nil end
+    cleanAllEsp()
+
+    if not State.PlayerESP then return end
+
+    -- Immediately wire all current players
+    for _, p in ipairs(Players:GetPlayers()) do
+        hookPlayerEsp(p)
+    end
+
+    -- Instantly pick up new joiners
+    playerAddedConn = Players.PlayerAdded:Connect(function(p)
+        if State.PlayerESP then hookPlayerEsp(p) end
+    end)
+    track(playerAddedConn)
+
+    -- Slow update loop (~4fps) — only updates labels/visibility, no instance creation
+    playerEspUpdateThread = task.spawn(function()
+        while State.PlayerESP and myLoopID == _G.TWDOLoopID do
+            pcall(function()
+                if not State.PlayerESP then return end
+
+                local localChar = player.Character
+                local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
+                local myPos = localHrp and localHrp.Position
+                local cam = workspace.CurrentCamera
+                local maxDist = State.ESPDistance or 1000
+
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= player then
+                        local char = p.Character
+                        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                        local hum = char and char:FindFirstChild("Humanoid")
+
+                        if char and hrp and hum and hum.Health > 0 and char.Parent then
+                            local guiData = PlayerEspGuis[p]
+                            -- Re-create if char changed (respawn) or ESP was destroyed
+                            if not guiData or guiData.Char ~= char
+                                or not guiData.Highlight.Parent then
+                                createPlayerEspGui(p, char, hrp)
+                                guiData = PlayerEspGuis[p]
                             end
-                            
-                            local infoParts = {}
-                            if State.ESPShowHealth then
-                                table.insert(infoParts, string.format("%d HP", math.floor(hum.Health)))
-                            end
-                            if State.ESPShowDistance then
-                                table.insert(infoParts, string.format("%dm", math.floor(dist)))
-                            end
-                            
-                            if #infoParts > 0 then
-                                table.insert(lines, table.concat(infoParts, " • "))
-                            end
-                            
-                            if State.ESPShowArmor then
-                                local helmetName, helmetDura, armorName, armorDura = getArmorStats(char)
-                                local armorLine = {}
-                                if helmetName then table.insert(armorLine, "🪖 " .. helmetName:gsub(" Helmet", ""):gsub(" Helm", "")) end
-                                if armorName then table.insert(armorLine, "👕 " .. armorName:gsub(" Armor", ""):gsub(" Vest", "")) end
-                                if #armorLine > 0 then
-                                    table.insert(lines, table.concat(armorLine, " "))
+
+                            if guiData then
+                                local dist = myPos and (myPos - hrp.Position).Magnitude or 0
+                                local inRange = dist <= maxDist
+                                local isVisible = true
+
+                                if inRange and State.ESPOnlyVisible and cam and localChar then
+                                    sharedRaycastParams.FilterDescendantsInstances = {localChar, char}
+                                    local ray = workspace:Raycast(
+                                        cam.CFrame.Position,
+                                        hrp.Position - cam.CFrame.Position,
+                                        sharedRaycastParams
+                                    )
+                                    if ray then isVisible = false end
+                                end
+
+                                -- Highlight off behind wall; billboard always visible
+                                guiData.Highlight.Enabled = inRange and (not State.ESPOnlyVisible or isVisible)
+                                guiData.Billboard.Enabled = inRange  -- always show stats
+
+                                if inRange then
+                                    local lines = {}
+                                    if State.ESPShowName then
+                                        table.insert(lines, p.Name)
+                                    end
+
+                                    local infoParts = {}
+                                    if State.ESPShowHealth then
+                                        table.insert(infoParts, string.format("%d HP", math.floor(hum.Health)))
+                                    end
+                                    if State.ESPShowDistance then
+                                        table.insert(infoParts, string.format("%dm", math.floor(dist)))
+                                    end
+                                    if #infoParts > 0 then
+                                        table.insert(lines, table.concat(infoParts, " • "))
+                                    end
+
+                                    if State.ESPShowArmor then
+                                        local helmetName, _, armorName, _ = getArmorStats(char)
+                                        local armorLine = {}
+                                        if helmetName then table.insert(armorLine, "🪖 " .. helmetName:gsub(" Helmet", ""):gsub(" Helm", "")) end
+                                        if armorName  then table.insert(armorLine, "👕 " .. armorName:gsub(" Armor", ""):gsub(" Vest", "")) end
+                                        if #armorLine > 0 then table.insert(lines, table.concat(armorLine, " ")) end
+                                    end
+
+                                    guiData.Label.Text = table.concat(lines, "\n")
+                                    -- White = visible, grey = behind wall (stats still readable)
+                                    guiData.Label.TextColor3 = isVisible
+                                        and Color3.new(1, 1, 1)
+                                        or  Color3.fromRGB(170, 170, 170)
                                 end
                             end
-                            
-                            guiData.Label.Text = table.concat(lines, "\n")
-                            guiData.Label.TextColor3 = isVisible and Color3.new(1, 1, 1) or Color3.fromRGB(150, 150, 150)
+                        else
+                            cleanEspForPlayer(p)
                         end
                     end
-                else
-                    cleanEspForPlayer(p)
                 end
+            end)
+            task.wait(0.25) -- ~4fps update rate, zero render thread impact
+        end
+        -- Auto-off cleanup
+        if not State.PlayerESP then
+            if playerAddedConn then untrack(playerAddedConn); playerAddedConn = nil end
+            for _, conn in pairs(playerHealthConns) do
+                pcall(function() conn:Disconnect() end)
             end
+            for k in pairs(playerHealthConns) do playerHealthConns[k] = nil end
+            cleanAllEsp()
         end
     end)
-    track(playerEspRenderConn)
+    trackThread(playerEspUpdateThread)
 end
 
 -- ─── WALKER / ZOMBIE ESP SYSTEM ────────────────────────────────────
@@ -836,54 +930,92 @@ local function startWalkerEspLoop()
         return
     end
     
-    walkerThread = task.spawn(function()
-        while State.WalkerESP and myLoopID == _G.TWDOLoopID do
-            local localChar = player.Character
-            local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
-            
-            if localHrp then
-                local myPos = localHrp.Position
-                local maxDist = State.WalkerDistance or 300
-                
-                local walkerFolders = {
-                    workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Walkers"),
-                    workspace:FindFirstChild("PresetWalkers")
-                }
-                
-                for _, folder in ipairs(walkerFolders) do
-                    if folder then
-                        for _, walker in ipairs(folder:GetChildren()) do
-                            if walker:IsA("Model") then
-                                local hum = walker:FindFirstChild("Humanoid")
-                                if hum and hum.Health > 0 then
-                                    if not WalkerEspInstances[walker] then
-                                        applyWalkerEsp(walker)
-                                    end
-                                    
-                                    local instances = WalkerEspInstances[walker]
-                                    if instances and instances[1] then
-                                        local bb = instances[1]
-                                        local hrp = walker:FindFirstChild("HumanoidRootPart") or walker.PrimaryPart
-                                        if hrp and bb.Parent then
-                                            local dist = (myPos - hrp.Position).Magnitude
-                                            local inRange = dist <= maxDist
-                                            bb.Enabled = inRange
-                                            if inRange then
-                                                local label = bb:FindFirstChildWhichIsA("TextLabel")
-                                                if label then
-                                                    label.Text = string.format("🧟 %s  •  %d HP  •  %dm", walker.Name, math.floor(hum.Health), math.floor(dist))
-                                                end
-                                            end
-                                        end
-                                    end
-                                else
-                                    cleanEspForWalker(walker)
-                                end
-                            end
-                        end
+    -- Cache folder references once
+    local walkerFolders = {
+        workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Walkers"),
+        workspace:FindFirstChild("PresetWalkers")
+    }
+
+    -- Initial scan: apply ESP to all walkers already present
+    for _, folder in ipairs(walkerFolders) do
+        if folder then
+            for _, walker in ipairs(folder:GetChildren()) do
+                if walker:IsA("Model") then
+                    local hum = walker:FindFirstChild("Humanoid")
+                    if hum and hum.Health > 0 and not WalkerEspInstances[walker] then
+                        applyWalkerEsp(walker)
                     end
                 end
             end
+            -- Wire ChildAdded so new walkers get ESP immediately
+            local conn = folder.ChildAdded:Connect(function(walker)
+                if State.WalkerESP and walker:IsA("Model") then
+                    task.wait() -- let properties settle
+                    local hum = walker:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then applyWalkerEsp(walker) end
+                end
+            end)
+            track(conn)
+            local remConn = folder.ChildRemoved:Connect(function(walker)
+                cleanEspForWalker(walker)
+            end)
+            track(remConn)
+        end
+    end
+
+    walkerThread = task.spawn(function()
+        -- Reuse a single table to avoid per-tick allocation
+        local toProcess = {}
+        while State.WalkerESP and myLoopID == _G.TWDOLoopID do
+            pcall(function()
+                local localChar = player.Character
+                local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
+                if not localHrp then return end
+
+                local myPos   = localHrp.Position
+                local maxDist = State.WalkerDistance or 300
+
+                -- Build process list without allocating new table each tick
+                local n = 0
+                for obj, insts in pairs(WalkerEspInstances) do
+                    n = n + 1; toProcess[n] = {obj = obj, insts = insts}
+                end
+                -- Clear stale entries beyond current count
+                for i = n + 1, #toProcess do toProcess[i] = nil end
+
+                for idx = 1, n do
+                    if idx % 30 == 0 then task.wait() end
+                    if not State.WalkerESP then break end
+
+                    local item   = toProcess[idx]
+                    local walker = item.obj
+                    local insts  = item.insts
+
+                    if not walker or not walker.Parent then
+                        cleanEspForWalker(walker)
+                    else
+                        local hum = walker:FindFirstChild("Humanoid")
+                        local bb  = insts[1]
+                        if hum and hum.Health > 0 and bb and bb.Parent then
+                            local hrp = walker:FindFirstChild("HumanoidRootPart") or walker.PrimaryPart
+                            if hrp then
+                                local dist    = (myPos - hrp.Position).Magnitude
+                                local inRange = dist <= maxDist
+                                bb.Enabled = inRange
+                                if inRange then
+                                    local label = bb:FindFirstChildWhichIsA("TextLabel")
+                                    if label then
+                                        label.Text = string.format("🧟 %s  •  %d HP  •  %dm",
+                                            walker.Name, math.floor(hum.Health), math.floor(dist))
+                                    end
+                                end
+                            end
+                        else
+                            cleanEspForWalker(walker)
+                        end
+                    end
+                end
+            end)
             task.wait(0.5)
         end
     end)
@@ -1088,104 +1220,120 @@ local vehicleEspConnections = {}
 local function startVehicleEspLoop()
     for _, c in ipairs(vehicleEspConnections) do pcall(function() c:Disconnect() end) end
     vehicleEspConnections = {}
-    
+
     if vehicleEspThread then
         pcall(function() task.cancel(vehicleEspThread) end)
         vehicleEspThread = nil
     end
-    
+
     if not State.VehicleESP then
         cleanAllVehicleEsp()
         return
     end
-    
+
     local function checkVehicleOrHorse(obj)
-        if not obj or not obj:IsA("Model") or not obj:IsDescendantOf(workspace) or VehicleEspInstances[obj] then return end
-        
-        local isCar = false
+        if not obj or not obj:IsA("Model")
+            or not obj:IsDescendantOf(workspace)
+            or VehicleEspInstances[obj] then return end
+
+        local isCar   = false
         local isHorse = false
-        local name = obj.Name
-        
+        local name    = obj.Name
+
         if State.VehicleShowCars ~= false then
-            if obj:FindFirstChildWhichIsA("VehicleSeat", true) or obj:FindFirstChild("DriveSeat", true) or obj:FindFirstChild("DriverSeat", true) then
+            if obj:FindFirstChildWhichIsA("VehicleSeat", true)
+                or obj:FindFirstChild("DriveSeat",  true)
+                or obj:FindFirstChild("DriverSeat", true) then
                 isCar = true
             end
         end
-        
+
         if State.VehicleShowHorses ~= false and not isCar then
             local lower = name:lower()
-            if lower:match("horse") or lower:match("mount") or lower:match("steed") or lower:match("pinto") or lower:match("stallion") or lower:match("mare") then
+            if lower:match("horse") or lower:match("mount") or lower:match("steed")
+                or lower:match("pinto") or lower:match("stallion") or lower:match("mare") then
                 isHorse = true
             end
         end
-        
+
         if isCar or isHorse then
-            local tag = isHorse and "🐎 Horse" or ("🚗 " .. name)
+            local tag = isHorse and ("🐎 " .. name) or ("🚗 " .. name)
             applyVehicleEsp(obj, isHorse, tag)
         end
     end
-    
-    -- Targeted Initial Scan (NO GetDescendants on entire Workspace)
+
+    -- Scan only the actual vehicle containers (not the entire workspace root)
     local scanTargets = {
-        workspace,
-        workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Wildlife"),
+        workspace:FindFirstChild("Cars"),           -- primary vehicle folder
         workspace:FindFirstChild("Vehicles"),
-        workspace:FindFirstChild("Cars"),
-        workspace:FindFirstChild("CarSpawns")
+        workspace:FindFirstChild("CarSpawns"),
+        workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Wildlife"),
     }
-    
+
     for _, container in ipairs(scanTargets) do
         if container then
+            -- Scan existing children
             for _, child in ipairs(container:GetChildren()) do
                 pcall(checkVehicleOrHorse, child)
             end
+            -- Watch for new vehicles spawning
             local conn = container.ChildAdded:Connect(function(child)
+                task.wait() -- let the object finish parenting before checking
                 pcall(checkVehicleOrHorse, child)
             end)
             table.insert(vehicleEspConnections, conn)
             track(conn)
+            -- Clean up ESP when vehicles are removed
+            local remConn = container.ChildRemoved:Connect(function(child)
+                pcall(cleanVehicleEsp, child)
+            end)
+            table.insert(vehicleEspConnections, remConn)
+            track(remConn)
         end
     end
-    
+
     vehicleEspThread = task.spawn(function()
         while State.VehicleESP and myLoopID == _G.TWDOLoopID do
             pcall(function()
-                local char = player.Character
-                local myPos = char and char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame.Position)
+                local char  = player.Character
+                local myPos = char and char:FindFirstChild("HumanoidRootPart")
+                    and char.HumanoidRootPart.Position
+                    or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame.Position)
                 local maxDist = State.VehicleDistance or 1000
-                
+
                 local toProcess = {}
                 for obj, insts in pairs(VehicleEspInstances) do
-                    table.insert(toProcess, {obj = obj, insts = insts})
+                    table.insert(toProcess, { obj = obj, insts = insts })
                 end
-                
+
                 for idx, item in ipairs(toProcess) do
-                    if idx % 15 == 0 then task.wait() end
+                    if idx % 20 == 0 then task.wait() end
                     if not State.VehicleESP then break end
-                    
-                    local obj = item.obj
+
+                    local obj   = item.obj
                     local insts = item.insts
-                    
+
                     if not obj or not obj.Parent then
                         cleanVehicleEsp(obj)
                     else
-                        local adornee = insts[1] and insts[1].Adornee
+                        local bb = insts[1]
+                        local adornee = bb and bb.Adornee
                         if adornee and adornee:IsDescendantOf(workspace) and myPos then
                             local dist = math.floor((adornee.Position - myPos).Magnitude)
                             if dist <= maxDist then
-                                local label = insts[1]:FindFirstChildWhichIsA("TextLabel")
+                                local label = bb:FindFirstChildWhichIsA("TextLabel")
                                 if label then
                                     local lowerName = obj.Name:lower()
                                     local isHorse = lowerName:match("horse") or lowerName:match("mount")
-                                    local prefix = isHorse and "🐎 Horse" or ("🚗 " .. obj.Name)
-                                    label.Text = prefix .. " • " .. dist .. "m"
+                                    local prefix  = isHorse and "🐎 " or "🚗 "
+                                    label.Text = prefix .. obj.Name .. " • " .. dist .. "m"
                                 end
-                                insts[1].Enabled = true
+                                bb.Enabled = true
                             else
-                                insts[1].Enabled = false
+                                bb.Enabled = false
                             end
-                        else
-                            insts[1].Enabled = false
+                        elseif bb then
+                            bb.Enabled = false
                         end
                     end
                 end
@@ -1221,10 +1369,83 @@ pcall(function()
     uiStroke.Transparency = 0.3
 end)
 
+-- ─── SILENT AIM — SHARED TARGET FINDER ────────────────────────────
+-- Called at fire-time inside the __index hook so the position is always
+-- the target's CURRENT location, not one that was cached 50ms ago.
+local _walkerFolderA = workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Walkers")
+local _walkerFolderB = workspace:FindFirstChild("PresetWalkers")
+
+local function findBestTarget()
+    local cam = workspace.CurrentCamera
+    if not cam then return nil end
+
+    local mousePos    = UserInputService:GetMouseLocation()
+    local fov         = State.SilentAimFOV or 150
+    local targetType  = State.SilentAimTargetType or "Both"
+    local partPref    = State.SilentAimPart or "Head"
+    local bestTarget  = nil
+    local bestDist    = fov  -- pixel radius threshold
+
+    local function evalChar(char)
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return end
+
+        local partName = "Head"
+        if partPref == "Body" then
+            partName = char:FindFirstChild("UpperTorso") and "UpperTorso" or "Torso"
+        elseif partPref == "Legs" then
+            partName = char:FindFirstChild("LeftLowerLeg") and "LeftLowerLeg" or "LeftLeg"
+        end
+
+        local part = char:FindFirstChild(partName)
+            or char:FindFirstChild("Head")
+            or char:FindFirstChild("HumanoidRootPart")
+        if not part then return end
+
+        local screenPos, onScreen = cam:WorldToViewportPoint(part.Position)
+        if not onScreen then return end
+
+        local pixelDist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+        if pixelDist < bestDist then
+            bestDist    = pixelDist
+            bestTarget  = part
+        end
+    end
+
+    if targetType == "Players" or targetType == "Both" then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= player and p.Character then
+                pcall(evalChar, p.Character)
+            end
+        end
+    end
+
+    if targetType == "Walkers" or targetType == "Both" then
+        -- Lazily refresh refs if not yet loaded at script start
+        if not _walkerFolderA then
+            _walkerFolderA = workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Walkers")
+        end
+        if not _walkerFolderB then
+            _walkerFolderB = workspace:FindFirstChild("PresetWalkers")
+        end
+        for _, folder in ipairs({_walkerFolderA, _walkerFolderB}) do
+            if folder then
+                for _, walker in ipairs(folder:GetChildren()) do
+                    if walker:IsA("Model") then pcall(evalChar, walker) end
+                end
+            end
+        end
+    end
+
+    return bestTarget
+end
+
 _G.TWDO_State = State
 _G.TWDO_SilentAimTarget = nil
 
-local frameCount = 0
+
+
+-- FOV circle update stays on RenderStepped (UI only — zero game logic)
 local silentAimLoop = RunService.RenderStepped:Connect(function()
     if fovCircleGui and fovCircleGui:FindFirstChild("CircleFrame") then
         local fovFrame = fovCircleGui.CircleFrame
@@ -1238,142 +1459,112 @@ local silentAimLoop = RunService.RenderStepped:Connect(function()
             fovFrame.Visible = false
         end
     end
-    
-    if not State.SilentAimActive then
-        _G.TWDO_SilentAimTarget = nil
-        return
-    end
-    
-    frameCount = frameCount + 1
-    if frameCount % 3 ~= 0 then return end
-    
-    local target = nil
-    local maxDistance = State.SilentAimFOV or 150
-    local mousePos = UserInputService:GetMouseLocation()
-    local cam = workspace.CurrentCamera
-    if not cam then _G.TWDO_SilentAimTarget = nil; return end
-    
-    local targetType = State.SilentAimTargetType or "Walkers"
-    local candidates = {}
-    
-    if targetType == "Players" or targetType == "Both" then
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= player and p.Character then table.insert(candidates, p.Character) end
-        end
-    end
-    
-    if targetType == "Walkers" or targetType == "Both" then
-        local walkerFolders = {
-            workspace:FindFirstChild("AI") and workspace.AI:FindFirstChild("Walkers"),
-            workspace:FindFirstChild("PresetWalkers")
-        }
-        for _, folder in ipairs(walkerFolders) do
-            if folder then
-                for _, walker in ipairs(folder:GetChildren()) do
-                    if walker:IsA("Model") then table.insert(candidates, walker) end
-                end
-            end
-        end
-    end
-    
-    for _, char in ipairs(candidates) do
-        local hum = char:FindFirstChild("Humanoid")
-        if hum and hum.Health > 0 then
-            local partName = "Head"
-            if State.SilentAimPart == "Body" then
-                partName = char:FindFirstChild("UpperTorso") and "UpperTorso" or "Torso"
-            elseif State.SilentAimPart == "Legs" then
-                partName = char:FindFirstChild("LeftLowerLeg") and "LeftLowerLeg" or "LeftLeg"
-            end
-            
-            local part = char:FindFirstChild(partName) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
-            if part then
-                local screenPos, onScreen = cam:WorldToViewportPoint(part.Position)
-                if onScreen then
-                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
-                    if dist < maxDistance then
-                        maxDistance = dist
-                        target = part
-                    end
-                end
-            end
-        end
-    end
-    _G.TWDO_SilentAimTarget = target
 end)
 track(silentAimLoop)
 
--- Metamethod hooks for Mouse.Hit, WalkSpeed, and Stamina Visual Effects
+-- Metamethod hooks for Mouse.Hit, Mouse.UnitRay, WalkSpeed, and Stamina Visual Effects
 local Mouse = player:GetMouse()
 
 pcall(function()
-    if not _G.TWDO_OriginalIndex then
-        local oldIndex
-        oldIndex = hookmetamethod(game, "__index", function(self, key)
-            local state = _G.TWDO_State
-            if state and state.SilentAimActive and not checkcaller() then
-                if self == Mouse and (key == "Hit" or key == "Target") then
-                    local targetPart = _G.TWDO_SilentAimTarget
-                    if targetPart and targetPart.Parent then
-                        if key == "Hit" then return targetPart.CFrame
-                        elseif key == "Target" then return targetPart end
-                    end
-                end
-            end
-            if oldIndex then
-                return oldIndex(self, key)
-            end
-            return self[key]
-        end)
-        if oldIndex then
-            _G.TWDO_OriginalIndex = oldIndex
-            _G.OriginalIndex = oldIndex
-        end
-    end
-    
-    if not _G.TWDO_OriginalNamecall then
-        local oldNamecall
-        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod()
-            local state = _G.TWDO_State
-            
-            if state and state.SilentAimActive and not checkcaller() then
-                local targetPart = _G.TWDO_SilentAimTarget
-                if targetPart and targetPart.Parent then
-                    if method == "Raycast" or method == "raycast" then
-                        local args = {...}
-                        local origin = args[1]
-                        if typeof(origin) == "Vector3" then
-                            args[2] = (targetPart.Position - origin).Unit * 5000
-                            return oldNamecall(self, unpack(args))
-                        end
-                    end
-                    
-                    if method == "FindPartOnWithIgnoreList" or method == "FindPartOnWithRay" or method == "findPartOnWithIgnoreList" then
-                        local args = {...}
-                        local ray = args[1]
-                        if typeof(ray) == "Ray" then
-                            args[1] = Ray.new(ray.Origin, (targetPart.Position - ray.Origin).Unit * 5000)
-                            return oldNamecall(self, unpack(args))
-                        end
-                    end
-                    
-                    if method == "FireServer" and (self.Name == "Fire" or self.Name == "Hit" or self.Name == "Hitmarker") then
-                        local args = {...}
-                        for i, arg in ipairs(args) do
-                            if typeof(arg) == "Vector3" then
-                                args[i] = targetPart.Position
-                            elseif typeof(arg) == "CFrame" then
-                                args[i] = targetPart.CFrame
+    local prevIndex
+    prevIndex = hookmetamethod(game, "__index", function(self, key)
+        local state = _G.TWDO_State
+        if state and state.SilentAimActive and not checkcaller() then
+            if self == Mouse then
+                -- Fire-time scan: always use the freshest target position.
+                -- findBestTarget() runs synchronously here (called once per shot,
+                -- not per-frame) and caches its result for the UnitRay + FireServer
+                -- hooks that follow immediately after.
+                if key == "Hit" or key == "Target" or key == "UnitRay" then
+                    local targetPart = findBestTarget()
+                    if targetPart then
+                        _G.TWDO_SilentAimTarget = targetPart  -- share with namecall hook
+                        if key == "Hit" then
+                            return targetPart.CFrame
+                        elseif key == "Target" then
+                            return targetPart
+                        elseif key == "UnitRay" then
+                            local cam = workspace.CurrentCamera
+                            if cam then
+                                local origin = cam.CFrame.Position
+                                local dir    = (targetPart.Position - origin).Unit
+                                return Ray.new(origin, dir * 5000)
                             end
                         end
-                        return oldNamecall(self, unpack(args))
+                    else
+                        _G.TWDO_SilentAimTarget = nil
                     end
                 end
             end
-            
-            -- Native Game Hitmarker & Sound Trigger
-            if method == "FireServer" and (self.Name == "Hitmarker" or self.Name == "Damage" or self.Name == "Hit") then
+        end
+        -- Pass through to the previous hook (game's original __index)
+        return prevIndex(self, key)
+    end)
+    _G.TWDO_OriginalIndex = prevIndex
+    _G.OriginalIndex = prevIndex
+    
+    local prevNamecall
+    prevNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+        local state = _G.TWDO_State
+        
+        if state and state.SilentAimActive and not checkcaller() then
+            local targetPart = _G.TWDO_SilentAimTarget
+            if targetPart and targetPart.Parent then
+                -- Redirect workspace/camera Raycast calls
+                if method == "Raycast" or method == "raycast" then
+                    local args = {...}
+                    local origin = args[1]
+                    if typeof(origin) == "Vector3" then
+                        args[2] = (targetPart.Position - origin).Unit * 5000
+                        return prevNamecall(self, unpack(args))
+                    end
+                end
+                
+                -- Redirect legacy Ray-based casts
+                if method == "FindPartOnWithIgnoreList" or method == "FindPartOnWithRay"
+                    or method == "FindPartOnRayWithIgnoreList" or method == "findPartOnWithIgnoreList" then
+                    local args = {...}
+                    local ray = args[1]
+                    if typeof(ray) == "Ray" then
+                        args[1] = Ray.new(ray.Origin, (targetPart.Position - ray.Origin).Unit * 5000)
+                        return prevNamecall(self, unpack(args))
+                    end
+                end
+
+                -- Redirect Camera:ScreenPointToRay and Camera:ViewportPointToRay
+                if method == "ScreenPointToRay" or method == "ViewportPointToRay" then
+                    local cam = workspace.CurrentCamera
+                    if cam and self == cam then
+                        local origin = cam.CFrame.Position
+                        local dir = (targetPart.Position - origin).Unit
+                        return Ray.new(origin, dir * 5000)
+                    end
+                end
+                
+                -- Redirect any FireServer call that carries position/CFrame args
+                -- (catches Fire, Hit, Hitmarker, Damage, and any other gun remote)
+                if method == "FireServer" then
+                    local args = {...}
+                    local modified = false
+                    for i, arg in ipairs(args) do
+                        if typeof(arg) == "Vector3" then
+                            args[i] = targetPart.Position
+                            modified = true
+                        end
+                        -- NOTE: Do NOT replace CFrame args (e.g. CurrentCamera.CFrame).
+                        -- The server uses camera CFrame for direction validation.
+                        -- Only the Vector3 hit position needs to be redirected.
+                    end
+                    if modified then
+                        return prevNamecall(self, unpack(args))
+                    end
+                end
+            end
+        end
+        
+        -- Native Game Hitmarker & Sound Trigger
+        if method == "FireServer" and (self.Name == "Hitmarker" or self.Name == "Damage" or self.Name == "Hit") then
                 pcall(function()
                     local userGui = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("UserGUI")
                     local hitImg = userGui and userGui:FindFirstChild("Hitmarker")
@@ -1403,16 +1594,12 @@ pcall(function()
                     end
                 end)
             end
-            if oldNamecall then
-                return oldNamecall(self, ...)
+            if prevNamecall then
+                return prevNamecall(self, ...)
             end
-            return self[method](self, ...)
         end)
-        if oldNamecall then
-            _G.TWDO_OriginalNamecall = oldNamecall
-            _G.OriginalNamecall = oldNamecall
-        end
-    end
+        _G.TWDO_OriginalNamecall = prevNamecall
+        _G.OriginalNamecall = prevNamecall
     
     pcall(function()
         local clientRemotes = RS:FindFirstChild("CLIENT_REMOTES")
@@ -1507,26 +1694,6 @@ pcall(function()
     end
 end)
     
-    if not _G.TWDO_OriginalTweenCreate then
-        local oldTweenCreate; oldTweenCreate = hookfunction(TweenService.Create, function(self, instance, tweenInfo, propertyTable)
-            local state = _G.TWDO_State
-            if state and state.InfStamina and not checkcaller() then
-                if typeof(instance) == "Instance" and instance:IsA("Humanoid") then
-                    local char = player.Character
-                    if char and instance:IsDescendantOf(char) then
-                        if propertyTable and propertyTable.WalkSpeed then
-                            if typeof(propertyTable.WalkSpeed) == "number" and propertyTable.WalkSpeed < 23 then
-                                propertyTable.WalkSpeed = 23
-                            end
-                        end
-                    end
-                end
-            end
-            return oldTweenCreate(self, instance, tweenInfo, propertyTable)
-        end)
-        _G.TWDO_OriginalTweenCreate = oldTweenCreate
-    end
-
 -- ─── UI ELEMENTS & HUDAS HUB DARK THEME ────────────────────────────
 local SG = Instance.new("ScreenGui")
 SG.Name = "TWDOHub"

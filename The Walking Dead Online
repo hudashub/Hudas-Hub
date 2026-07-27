@@ -75,7 +75,7 @@ local function cleanAllLootEsp()
 end
 
 -- Centralized Player ESP Data
-local PlayerEspGuis = {}
+local PlayerEspGuis = setmetatable({}, {__mode = "k"})
 
 local function cleanEspForPlayer(p)
     local guiData = PlayerEspGuis[p]
@@ -437,35 +437,61 @@ trackThread(task.spawn(function()
                 if cBlur then cBlur.Enabled = false; cBlur.Size = 0 end
                 
                 local userGui = player.PlayerGui:FindFirstChild("UserGUI")
-                local sVignette = userGui and userGui:FindFirstChild("StaminaVignette")
-                if sVignette then sVignette.ImageTransparency = 1; sVignette.Visible = false end
+                if userGui then
+                    for _, vName in ipairs({"ShootVignette", "HurtVignette", "StaminaVignette"}) do
+                        local v = userGui:FindFirstChild(vName)
+                        if v then v.ImageTransparency = 1; v.Visible = false end
+                    end
+                end
             end
         end)
         
 local processedGunModules = setmetatable({}, {__mode = "k"})
 
-        -- Zeroing out gun config tables in backpack and character
+        -- Zeroing out gun config tables in ItemData, backpack and character
         pcall(function()
+            if State.NoRecoilSpread then
+                local itemDataMod = RS:FindFirstChild("CLIENT_MODULES") and RS.CLIENT_MODULES:FindFirstChild("ItemData")
+                if itemDataMod then
+                    local data = require(itemDataMod)
+                    if type(data) == "table" then
+                        for name, gun in pairs(data) do
+                            if type(gun) == "table" and (gun.Type == "Gun" or gun.Recoil ~= nil) then
+                                gun.Recoil = 0
+                                gun.SpreadAngle = 0
+                                gun.ADSSpreadAngle = 0
+                                gun.BloomAdd = 0
+                                gun.ADSBloomAdd = 0
+                                gun.MaxBloom = 0
+                                gun.ADSMaxBloom = 0
+                                if gun.Kick then gun.Kick = 0 end
+                                if gun.KickUp then gun.KickUp = 0 end
+                                if gun.Spray then gun.Spray = 0 end
+                                if gun.Accuracy then gun.Accuracy = 1 end
+                            end
+                        end
+                    end
+                end
+            end
+
             local function modifyConfig(inst)
-                if inst:IsA("ModuleScript") and not processedGunModules[inst] and (inst.Name:lower():match("config") or inst.Name:lower():match("setting") or inst.Name:lower():match("gun")) then
-                    processedGunModules[inst] = true
+                if inst:IsA("ModuleScript") and (inst.Name:lower():match("config") or inst.Name:lower():match("setting") or inst.Name:lower():match("gun")) then
                     local config = require(inst)
                     if type(config) == "table" then
                         if State.NoRecoilSpread then
-                            if config.Recoil then config.Recoil = 0 end
-                            if config.Spread then config.Spread = 0 end
-                            if config.MinSpread then config.MinSpread = 0 end
-                            if config.MaxSpread then config.MaxSpread = 0 end
-                            if config.SpreadAngle then config.SpreadAngle = 0 end
-                            if config.ADSSpreadAngle then config.ADSSpreadAngle = 0 end
-                            if config.BloomAdd then config.BloomAdd = 0 end
-                            if config.ADSBloomAdd then config.ADSBloomAdd = 0 end
-                            if config.MaxBloom then config.MaxBloom = 0 end
-                            if config.ADSMaxBloom then config.ADSMaxBloom = 0 end
-                            if config.Spray then config.Spray = 0 end
-                            if config.Kick then config.Kick = 0 end
-                            if config.KickUp then config.KickUp = 0 end
-                            if config.Accuracy then config.Accuracy = 1 end
+                            config.Recoil = 0
+                            config.Spread = 0
+                            config.MinSpread = 0
+                            config.MaxSpread = 0
+                            config.SpreadAngle = 0
+                            config.ADSSpreadAngle = 0
+                            config.BloomAdd = 0
+                            config.ADSBloomAdd = 0
+                            config.MaxBloom = 0
+                            config.ADSMaxBloom = 0
+                            config.Spray = 0
+                            config.Kick = 0
+                            config.KickUp = 0
                         end
                         
                         if State.InstantReload then
@@ -473,14 +499,6 @@ local processedGunModules = setmetatable({}, {__mode = "k"})
                             if config.TacticalReloadTime then config.TacticalReloadTime = 0.01 end
                             if config.EmptyReloadTime then config.EmptyReloadTime = 0.01 end
                             if config.ReloadSpeed then config.ReloadSpeed = 100 end
-                        end
-                        
-                        if State.InfAmmoDurability then
-                            if config.DurabilityLossPerShot then config.DurabilityLossPerShot = 0 end
-                            if config.DurabilityLoss then config.DurabilityLoss = 0 end
-                            if config.Durability then config.Durability = 100 end
-                            if config.InfiniteAmmo ~= nil then config.InfiniteAmmo = true end
-                            if config.Ammo and config.MaxAmmo then config.Ammo = config.MaxAmmo end
                         end
                     end
                 end
@@ -493,45 +511,6 @@ local processedGunModules = setmetatable({}, {__mode = "k"})
             if char then
                 for _, item in ipairs(char:GetDescendants()) do
                     pcall(modifyConfig, item)
-                end
-local maxMagTable = {
-    BerretaM9 = 15, Glock17 = 17, ["Colt Python"] = 6, M1911 = 7, ["USP .45"] = 12, ["FN Five-seveN"] = 20, ["Desert Eagle"] = 7,
-    Model77E = 7, ["Remington 870"] = 7, MP5 = 30, ["HK UMP-45"] = 25, ["Ruger 10/22"] = 10, ["AKS-74U"] = 30, ["Steyr AUG"] = 30,
-    M16 = 30, AR15 = 30, AK47 = 30, SKS = 10, SVD = 10, Kar98K = 5, ["FN FAL"] = 20, ["SCAR H"] = 20, ["VSS Vintorez"] = 10, M40 = 5, M82A1 = 10
-}
-
-                if State.InfAmmoDurability then
-                    pcall(function()
-                        local dataClientMod = RS:FindFirstChild("CLIENT_MODULES") and RS.CLIENT_MODULES:FindFirstChild("DataClient")
-                        if dataClientMod then
-                            local dc = require(dataClientMod)
-                            if dc and dc.Table and dc.Table.InventoryData then
-                                for id, itemData in pairs(dc.Table.InventoryData) do
-                                    if type(itemData) == "table" then
-                                        if itemData.Type == "Gun" then
-                                            itemData.Durability = 100
-                                            local realMax = maxMagTable[itemData.ItemName]
-                                            if not realMax and ItemDataModule and ItemDataModule[itemData.ItemName] then
-                                                realMax = ItemDataModule[itemData.ItemName].MaxAmmo or ItemDataModule[itemData.ItemName].ClipSize or 30
-                                            end
-                                            itemData.Ammo = realMax or 30
-                                        elseif itemData.Type == "Ammo" then
-                                            itemData.Amt = 99
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end)
-                    for _, tool in ipairs(player.Backpack:GetChildren()) do
-                        if tool:IsA("Tool") then
-                            if tool:GetAttribute("Durability") then tool:SetAttribute("Durability", 100) end
-                            if tool:GetAttribute("DuraTex") then tool:SetAttribute("DuraTex", 100) end
-                            if tool:GetAttribute("Ammo") and tool:GetAttribute("MaxAmmo") then
-                                tool:SetAttribute("Ammo", tool:GetAttribute("MaxAmmo"))
-                            end
-                        end
-                    end
                 end
             end
         end)
@@ -1379,15 +1358,13 @@ pcall(function()
                         end
                     end
                     
-                    if method == "FireServer" and (self.Name == "Fire" or self.Name == "Hit") then
+                    if method == "FireServer" and (self.Name == "Fire" or self.Name == "Hit" or self.Name == "Hitmarker") then
                         local args = {...}
                         for i, arg in ipairs(args) do
                             if typeof(arg) == "Vector3" then
                                 args[i] = targetPart.Position
                             elseif typeof(arg) == "CFrame" then
                                 args[i] = targetPart.CFrame
-                            elseif typeof(arg) == "Instance" and arg:IsA("BasePart") then
-                                args[i] = targetPart
                             end
                         end
                         return oldNamecall(self, unpack(args))
@@ -1395,6 +1372,37 @@ pcall(function()
                 end
             end
             
+            -- Native Game Hitmarker & Sound Trigger
+            if method == "FireServer" and (self.Name == "Hitmarker" or self.Name == "Damage" or self.Name == "Hit") then
+                pcall(function()
+                    local userGui = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("UserGUI")
+                    local hitImg = userGui and userGui:FindFirstChild("Hitmarker")
+                    
+                    if hitImg then
+                        hitImg.Image = "rbxassetid://8797893157"
+                        hitImg.Visible = true
+                        hitImg.ImageTransparency = 0
+                        hitImg.Size = UDim2.fromOffset(36, 36)
+                        hitImg.Position = UDim2.new(0.5, 0, 0.5, 0)
+                        hitImg.AnchorPoint = Vector2.new(0.5, 0.5)
+                        TweenService:Create(hitImg, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                            ImageTransparency = 1,
+                            Size = UDim2.fromOffset(28, 28)
+                        }):Play()
+                    end
+                    
+                    local rs = game:GetService("ReplicatedStorage")
+                    local hitEffects = rs:FindFirstChild("CLIENT_GUNSYS_ASSETS") and rs.CLIENT_GUNSYS_ASSETS:FindFirstChild("HitEffects")
+                    local fleshSounds = hitEffects and hitEffects:FindFirstChild("Flesh") and hitEffects.Flesh:FindFirstChild("MaterialSounds")
+                    local nativeSnd = fleshSounds and fleshSounds:FindFirstChildWhichIsA("Sound")
+                    if nativeSnd then
+                        local snd = nativeSnd:Clone()
+                        snd.Parent = workspace.CurrentCamera
+                        snd:Play()
+                        game:GetService("Debris"):AddItem(snd, 1.2)
+                    end
+                end)
+            end
             if oldNamecall then
                 return oldNamecall(self, ...)
             end
@@ -1406,11 +1414,47 @@ pcall(function()
         end
     end
     
+    pcall(function()
+        local clientRemotes = RS:FindFirstChild("CLIENT_REMOTES")
+        local gunRemotes = clientRemotes and clientRemotes:FindFirstChild("GUN_REMOTES")
+        local hitRemote = gunRemotes and gunRemotes:FindFirstChild("Hitmarker")
+        if hitRemote then
+            track(hitRemote.OnClientEvent:Connect(function()
+                local userGui = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("UserGUI")
+                local hitImg = userGui and userGui:FindFirstChild("Hitmarker")
+                
+                if hitImg then
+                    hitImg.Image = "rbxassetid://8797893157"
+                    hitImg.Visible = true
+                    hitImg.ImageTransparency = 0
+                    hitImg.Size = UDim2.fromOffset(36, 36)
+                    hitImg.Position = UDim2.new(0.5, 0, 0.5, 0)
+                    hitImg.AnchorPoint = Vector2.new(0.5, 0.5)
+                    TweenService:Create(hitImg, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                        ImageTransparency = 1,
+                        Size = UDim2.fromOffset(28, 28)
+                    }):Play()
+                end
+                
+                local rs = game:GetService("ReplicatedStorage")
+                local hitEffects = rs:FindFirstChild("CLIENT_GUNSYS_ASSETS") and rs.CLIENT_GUNSYS_ASSETS:FindFirstChild("HitEffects")
+                local fleshSounds = hitEffects and hitEffects:FindFirstChild("Flesh") and hitEffects.Flesh:FindFirstChild("MaterialSounds")
+                local nativeSnd = fleshSounds and fleshSounds:FindFirstChildWhichIsA("Sound")
+                if nativeSnd then
+                    local snd = nativeSnd:Clone()
+                    snd.Parent = workspace.CurrentCamera
+                    snd:Play()
+                    game:GetService("Debris"):AddItem(snd, 1.2)
+                end
+            end))
+        end
+    end)
+    
     if not _G.TWDO_OriginalNewIndex then
         local oldNewIndex
         oldNewIndex = hookmetamethod(game, "__newindex", function(self, key, value)
             local state = _G.TWDO_State
-            if state and state.InfStamina and not checkcaller() then
+            if state and not checkcaller() then
                 if key == "WalkSpeed" and typeof(self) == "Instance" and self:IsA("Humanoid") then
                     local char = player.Character
                     if char and self:IsDescendantOf(char) then
@@ -1418,7 +1462,7 @@ pcall(function()
                             value = 23
                         end
                     end
-                elseif (key == "ImageTransparency" or key == "Visible") and typeof(self) == "Instance" and self.Name == "StaminaVignette" then
+                elseif (key == "ImageTransparency" or key == "Visible") and typeof(self) == "Instance" and (self.Name == "StaminaVignette" or self.Name == "ShootVignette" or self.Name == "HurtVignette") then
                     if key == "ImageTransparency" then value = 1 end
                     if key == "Visible" then value = false end
                 elseif (key == "Size" or key == "Enabled") and typeof(self) == "Instance" and (self.Name == "StaminaBlur" or self.Name == "CharBlur") then
@@ -1898,7 +1942,6 @@ toggle("⭕", "Show FOV Circle", function(v) State.ShowFOVCircle = v end, "ShowF
 section("Weapon & Movement Modifiers")
 toggle("🔫", "No Recoil & Zero Spread", function(v) State.NoRecoilSpread = v end, "NoRecoilSpread")
 toggle("⚡", "Instant Reload (Normal RPM)", function(v) State.InstantReload = v end, "InstantReload")
-toggle("♾️", "Infinite Ammo & Weapon Durability", function(v) State.InfAmmoDurability = v end, "InfAmmoDurability")
 toggle("⚡", "Infinite Stamina", function(v) State.InfStamina = v end, "InfStamina")
 toggle("👻", "Noclip", function(v) State.Noclip = v; updateNoclip() end, "Noclip")
 toggle("🛡️", "God Mode (Zombie Desync)", function(v) State.GodMode = v; updateGodMode() end, "GodMode")

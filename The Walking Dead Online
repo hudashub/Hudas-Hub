@@ -1500,7 +1500,9 @@ pcall(function()
             end
         end
         -- Pass through to the previous hook (game's original __index)
-        return prevIndex(self, key)
+        if prevIndex then
+            return prevIndex(self, key)
+        end
     end)
     _G.TWDO_OriginalIndex = prevIndex
     _G.OriginalIndex = prevIndex
@@ -1561,7 +1563,9 @@ pcall(function()
                         end
                         if modified then
                             setnamecallmethod(method)
-                            return prevNamecall(self, table.unpack(args, 1, select("#", ...)))
+                            if prevNamecall then
+                                return prevNamecall(self, table.unpack(args, 1, select("#", ...)))
+                            end
                         end
                     end
                 end

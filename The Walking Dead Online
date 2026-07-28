@@ -1476,7 +1476,7 @@ pcall(function()
     prevIndex = hookmetamethod(game, "__index", function(self, key)
         local state = _G.TWDO_State
         if state and state.SilentAimActive and not checkcaller() then
-            if self == Mouse then
+            if typeof(self) == "Instance" and self:IsA("Mouse") then
                 if key == "Hit" or key == "Target" or key == "UnitRay" then
                     local targetPart = _G.TWDO_SilentAimTarget
                     local success, isValid = pcall(function()
@@ -1492,7 +1492,7 @@ pcall(function()
                             if cam then
                                 local origin = cam.CFrame.Position
                                 local dir = (targetPart.Position - origin).Unit
-                                return Ray.new(origin, dir * 5000)
+                                return Ray.new(origin, dir)
                             end
                         end
                     end
@@ -1517,46 +1517,48 @@ pcall(function()
             end)
             if success and isValid then
                 -- Redirect weapon-related FireServer calls that carry Vector3 coordinates
-                if method == "FireServer" then
+                if method == "FireServer" and typeof(self) == "Instance" then
                     local nameLower = self.Name:lower()
-                    if nameLower:match("hit") or nameLower:match("dmg") or nameLower:match("damage") 
+                    local isGunRemote = nameLower:match("hit") or nameLower:match("dmg") or nameLower:match("damage") 
                        or nameLower:match("shoot") or nameLower:match("fire") or nameLower:match("bullet") 
-                       or (self.Parent and self.Parent.Name == "GUN_REMOTES") then
+                       or (self.Parent and self.Parent.Name == "GUN_REMOTES")
                        
+                    if isGunRemote then
                         local args = {...}
                         local modified = false
-                                                 -- Find bullet origin or fallback to player position
-                         local origin = nil
-                         local char = player.Character
-                         local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                         local playerPos = hrp and hrp.Position or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame.Position) or Vector3.new(0, 0, 0)
-                         
-                         for i, arg in ipairs(args) do
-                             if typeof(arg) == "Vector3" then
-                                 if (arg - playerPos).Magnitude < 15 and arg.Magnitude > 1.5 then
-                                     origin = arg
-                                     break
-                                 end
-                             end
-                         end
-                         if not origin then origin = playerPos end
-                         
-                         for i, arg in ipairs(args) do
-                             if typeof(arg) == "Vector3" then
-                                 if arg ~= origin then
-                                     local mag = arg.Magnitude
-                                     if mag >= 0.8 and mag <= 1.2 then
-                                         -- Direction vector: point it from origin to target
-                                         args[i] = (targetPart.Position - origin).Unit
-                                         modified = true
-                                     elseif mag > 1.2 then
-                                         -- Position vector: redirect to target position
-                                         args[i] = targetPart.Position
-                                         modified = true
-                                     end
-                                 end
-                             end
-                         end
+                        
+                        -- Find bullet origin or fallback to player position
+                        local origin = nil
+                        local char = player.Character
+                        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                        local playerPos = hrp and hrp.Position or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame.Position) or Vector3.new(0, 0, 0)
+                        
+                        for i, arg in ipairs(args) do
+                            if typeof(arg) == "Vector3" then
+                                if (arg - playerPos).Magnitude < 15 and arg.Magnitude > 1.5 then
+                                    origin = arg
+                                    break
+                                end
+                            end
+                        end
+                        if not origin then origin = playerPos end
+                        
+                        for i, arg in ipairs(args) do
+                            if typeof(arg) == "Vector3" then
+                                if arg ~= origin then
+                                    local mag = arg.Magnitude
+                                    if mag >= 0.8 and mag <= 1.2 then
+                                        -- Direction vector: point it from origin to target
+                                        args[i] = (targetPart.Position - origin).Unit
+                                        modified = true
+                                    elseif mag > 1.2 then
+                                        -- Position vector: redirect to target position
+                                        args[i] = targetPart.Position
+                                        modified = true
+                                    end
+                                end
+                            end
+                        end
                         if modified then
                             setnamecallmethod(method)
                             return prevNamecall(self, table.unpack(args, 1, select("#", ...)))
@@ -1567,34 +1569,36 @@ pcall(function()
         end
         
         -- Native Game Hitmarker & Sound Trigger
-        if method == "FireServer" and (self.Name == "Hitmarker" or self.Name == "Damage" or self.Name == "Hit") then
-            pcall(function()
-                local userGui = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("UserGUI")
-                local hitImg = userGui and userGui:FindFirstChild("Hitmarker")
-                
-                if hitImg then
-                    hitImg.Image = "rbxassetid://8797893157"
-                    hitImg.Visible = true
-                    hitImg.ImageTransparency = 0
-                    hitImg.Size = UDim2.fromOffset(36, 36)
-                    hitImg.Position = UDim2.new(0.5, 0, 0.5, 0)
-                    hitImg.AnchorPoint = Vector2.new(0.5, 0.5)
-                    TweenService:Create(hitImg, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-                        ImageTransparency = 1,
-                        Size = UDim2.fromOffset(28, 28)
-                    }):Play()
-                end
-                
-                local rs = game:GetService("ReplicatedStorage")
-                local hitEffects = rs:FindFirstChild("CLIENT_GUNSYS_ASSETS") and rs.CLIENT_GUNSYS_ASSETS:FindFirstChild("HitEffects")
-                local fleshSounds = hitEffects and hitEffects:FindFirstChild("Flesh") and hitEffects.Flesh:FindFirstChild("MaterialSounds")
-                local nativeSnd = fleshSounds and fleshSounds:FindFirstChildWhichIsA("Sound")
-                if nativeSnd then
-                    local snd = nativeSnd:Clone()
-                    snd.Parent = workspace.CurrentCamera
-                    snd:Play()
-                    game:GetService("Debris"):AddItem(snd, 1.2)
-                end
+        if method == "FireServer" and typeof(self) == "Instance" and (self.Name == "Hitmarker" or self.Name == "Damage" or self.Name == "Hit") then
+            task.defer(function()
+                pcall(function()
+                    local userGui = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("UserGUI")
+                    local hitImg = userGui and userGui:FindFirstChild("Hitmarker")
+                    
+                    if hitImg then
+                        hitImg.Image = "rbxassetid://8797893157"
+                        hitImg.Visible = true
+                        hitImg.ImageTransparency = 0
+                        hitImg.Size = UDim2.fromOffset(36, 36)
+                        hitImg.Position = UDim2.new(0.5, 0, 0.5, 0)
+                        hitImg.AnchorPoint = Vector2.new(0.5, 0.5)
+                        TweenService:Create(hitImg, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                            ImageTransparency = 1,
+                            Size = UDim2.fromOffset(28, 28)
+                        }):Play()
+                    end
+                    
+                    local rs = game:GetService("ReplicatedStorage")
+                    local hitEffects = rs:FindFirstChild("CLIENT_GUNSYS_ASSETS") and rs.CLIENT_GUNSYS_ASSETS:FindFirstChild("HitEffects")
+                    local fleshSounds = hitEffects and hitEffects:FindFirstChild("Flesh") and hitEffects.Flesh:FindFirstChild("MaterialSounds")
+                    local nativeSnd = fleshSounds and fleshSounds:FindFirstChildWhichIsA("Sound")
+                    if nativeSnd then
+                        local snd = nativeSnd:Clone()
+                        snd.Parent = workspace.CurrentCamera
+                        snd:Play()
+                        game:GetService("Debris"):AddItem(snd, 1.2)
+                    end
+                end)
             end)
         end
         
@@ -1603,7 +1607,7 @@ pcall(function()
             return prevNamecall(self, ...)
         end
     end)
-        _G.TWDO_OriginalNamecall = prevNamecall
+    _G.TWDO_OriginalNamecall = prevNamecall
         _G.OriginalNamecall = prevNamecall
     
     pcall(function()
@@ -1647,25 +1651,26 @@ pcall(function()
         oldNewIndex = hookmetamethod(game, "__newindex", function(self, key, value)
             local state = _G.TWDO_State
             if state and not checkcaller() then
-                if key == "WalkSpeed" and typeof(self) == "Instance" and self:IsA("Humanoid") then
-                    local char = player.Character
-                    if char and self:IsDescendantOf(char) then
-                        if typeof(value) == "number" and value < 23 then
-                            value = 23
+                pcall(function()
+                    if key == "WalkSpeed" and typeof(self) == "Instance" and self:IsA("Humanoid") then
+                        local char = player.Character
+                        if char and self:IsDescendantOf(char) then
+                            if typeof(value) == "number" and value < 23 then
+                                value = 23
+                            end
                         end
+                    elseif (key == "ImageTransparency" or key == "Visible") and typeof(self) == "Instance" and (self.Name == "StaminaVignette" or self.Name == "ShootVignette" or self.Name == "HurtVignette") then
+                        if key == "ImageTransparency" then value = 1 end
+                        if key == "Visible" then value = false end
+                    elseif (key == "Size" or key == "Enabled") and typeof(self) == "Instance" and (self.Name == "StaminaBlur" or self.Name == "CharBlur") then
+                        if key == "Size" then value = 0 end
+                        if key == "Enabled" then value = false end
                     end
-                elseif (key == "ImageTransparency" or key == "Visible") and typeof(self) == "Instance" and (self.Name == "StaminaVignette" or self.Name == "ShootVignette" or self.Name == "HurtVignette") then
-                    if key == "ImageTransparency" then value = 1 end
-                    if key == "Visible" then value = false end
-                elseif (key == "Size" or key == "Enabled") and typeof(self) == "Instance" and (self.Name == "StaminaBlur" or self.Name == "CharBlur") then
-                    if key == "Size" then value = 0 end
-                    if key == "Enabled" then value = false end
-                end
+                end)
             end
             if oldNewIndex then
                 return oldNewIndex(self, key, value)
             end
-            self[key] = value
         end)
         if oldNewIndex then
             _G.TWDO_OriginalNewIndex = oldNewIndex

@@ -1459,6 +1459,12 @@ local silentAimLoop = RunService.RenderStepped:Connect(function()
             fovFrame.Visible = false
         end
     end
+    
+    if State.SilentAimActive then
+        _G.TWDO_SilentAimTarget = findBestTarget()
+    else
+        _G.TWDO_SilentAimTarget = nil
+    end
 end)
 track(silentAimLoop)
 
@@ -1471,14 +1477,9 @@ pcall(function()
         local state = _G.TWDO_State
         if state and state.SilentAimActive and not checkcaller() then
             if self == Mouse then
-                -- Fire-time scan: always use the freshest target position.
-                -- findBestTarget() runs synchronously here (called once per shot,
-                -- not per-frame) and caches its result for the UnitRay + FireServer
-                -- hooks that follow immediately after.
                 if key == "Hit" or key == "Target" or key == "UnitRay" then
-                    local targetPart = findBestTarget()
-                    if targetPart then
-                        _G.TWDO_SilentAimTarget = targetPart  -- share with namecall hook
+                    local targetPart = _G.TWDO_SilentAimTarget
+                    if targetPart and targetPart.Parent then
                         if key == "Hit" then
                             return targetPart.CFrame
                         elseif key == "Target" then
@@ -1491,8 +1492,6 @@ pcall(function()
                                 return Ray.new(origin, dir * 5000)
                             end
                         end
-                    else
-                        _G.TWDO_SilentAimTarget = nil
                     end
                 end
             end
@@ -1511,53 +1510,24 @@ pcall(function()
         if state and state.SilentAimActive and not checkcaller() then
             local targetPart = _G.TWDO_SilentAimTarget
             if targetPart and targetPart.Parent then
-                -- Redirect workspace/camera Raycast calls
-                if method == "Raycast" or method == "raycast" then
-                    local args = {...}
-                    local origin = args[1]
-                    if typeof(origin) == "Vector3" then
-                        args[2] = (targetPart.Position - origin).Unit * 5000
-                        return prevNamecall(self, unpack(args))
-                    end
-                end
-                
-                -- Redirect legacy Ray-based casts
-                if method == "FindPartOnWithIgnoreList" or method == "FindPartOnWithRay"
-                    or method == "FindPartOnRayWithIgnoreList" or method == "findPartOnWithIgnoreList" then
-                    local args = {...}
-                    local ray = args[1]
-                    if typeof(ray) == "Ray" then
-                        args[1] = Ray.new(ray.Origin, (targetPart.Position - ray.Origin).Unit * 5000)
-                        return prevNamecall(self, unpack(args))
-                    end
-                end
-
-                -- Redirect Camera:ScreenPointToRay and Camera:ViewportPointToRay
-                if method == "ScreenPointToRay" or method == "ViewportPointToRay" then
-                    local cam = workspace.CurrentCamera
-                    if cam and self == cam then
-                        local origin = cam.CFrame.Position
-                        local dir = (targetPart.Position - origin).Unit
-                        return Ray.new(origin, dir * 5000)
-                    end
-                end
-                
-                -- Redirect any FireServer call that carries position/CFrame args
-                -- (catches Fire, Hit, Hitmarker, Damage, and any other gun remote)
+                -- Redirect weapon-related FireServer calls that carry Vector3 coordinates
                 if method == "FireServer" then
-                    local args = {...}
-                    local modified = false
-                    for i, arg in ipairs(args) do
-                        if typeof(arg) == "Vector3" then
-                            args[i] = targetPart.Position
-                            modified = true
+                    local nameLower = self.Name:lower()
+                    if nameLower:match("hit") or nameLower:match("dmg") or nameLower:match("damage") 
+                       or nameLower:match("shoot") or nameLower:match("fire") or nameLower:match("bullet") 
+                       or (self.Parent and self.Parent.Name == "GUN_REMOTES") then
+                       
+                        local args = {...}
+                        local modified = false
+                        for i, arg in ipairs(args) do
+                            if typeof(arg) == "Vector3" then
+                                args[i] = targetPart.Position
+                                modified = true
+                            end
                         end
-                        -- NOTE: Do NOT replace CFrame args (e.g. CurrentCamera.CFrame).
-                        -- The server uses camera CFrame for direction validation.
-                        -- Only the Vector3 hit position needs to be redirected.
-                    end
-                    if modified then
-                        return prevNamecall(self, unpack(args))
+                        if modified then
+                            return prevNamecall(self, unpack(args))
+                        end
                     end
                 end
             end
